@@ -5,7 +5,7 @@ import json
 import time
 
 from autocomplete import set_corpus_index
-from cli import main as run_cli
+from cli import run_mode_menu as run_cli
 from src.corpus.initialization import initialize_corpus
 from src.logging_config import (
     configure_logging,

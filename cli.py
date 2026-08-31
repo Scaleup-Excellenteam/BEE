@@ -11,6 +11,101 @@ from src.logging_config import get_application_logger
 LOGGER = get_application_logger()
 
 
+def _print_mode_menu() -> None:
+    """Display the application's top-level mode choices."""
+    print("=" * 32)
+    print("       SMART AUTOCOMPLETE")
+    print("=" * 32)
+    print()
+    print("Choose mode:")
+    print()
+    print("1. Regular Autocomplete")
+    print("2. Semantic Search")
+    print("3. Exit")
+    print()
+
+
+def _run_semantic_mode(
+    semantic_search_fn,
+    embedded_sentences,
+    embedder,
+) -> None:
+    """Run one semantic query using dependencies supplied at startup."""
+    print("Semantic Search")
+    print()
+
+    if (
+        semantic_search_fn is None
+        or embedded_sentences is None
+        or embedder is None
+    ):
+        print("Semantic Search is temporarily unavailable.")
+        return
+
+    print("Enter your query:")
+    query = input()
+
+    try:
+        results = semantic_search_fn(
+            query,
+            embedded_sentences,
+            embedder,
+        )
+    except Exception:
+        LOGGER.error("Semantic search failed.")
+        print("Semantic Search is temporarily unavailable.")
+        return
+
+    if not results:
+        print("No semantic results found.")
+        return
+
+    print(f"Here are {len(results)} semantic results:")
+    print()
+
+    for position, result in enumerate(results, start=1):
+        print(f"{position}. {result.sentence}")
+        print(f"   Source: {result.source_text}:{result.offset}")
+        print(f"   Similarity: {result.similarity:.3f}")
+        print()
+
+
+def run_mode_menu(
+    *,
+    semantic_search_fn=None,
+    embedded_sentences=None,
+    embedder=None,
+) -> None:
+    """Run the mode menu with optional injected semantic dependencies."""
+    while True:
+        try:
+            _print_mode_menu()
+            choice = input("> ").strip()
+
+            if choice == "1":
+                main()
+                return
+
+            if choice == "2":
+                _run_semantic_mode(
+                    semantic_search_fn,
+                    embedded_sentences,
+                    embedder,
+                )
+                continue
+
+            if choice == "3":
+                return
+
+            print("Invalid option. Please choose 1, 2, or 3.")
+        except EOFError:
+            LOGGER.info("Application closed by the user.")
+            return
+        except KeyboardInterrupt:
+            LOGGER.info("Application interrupted by the user.")
+            return
+
+
 def _read_windows_prefilled_input(initial_text: str) -> str:
     """Read an editable line prefilled with text in a Windows console."""
     import msvcrt
@@ -183,4 +278,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    run_mode_menu()
