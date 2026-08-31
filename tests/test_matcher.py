@@ -1,6 +1,10 @@
 import pytest
 
-from src.matching.matcher import _score_equal_length_match
+from src.matching.matcher import (
+    _score_equal_length_match,
+    _score_extra_character_match,
+    _score_missing_character_match,
+)
 
 
 def test_exact_equal_length_match() -> None:
@@ -39,3 +43,59 @@ def test_two_mismatches_returns_none() -> None:
 
 def test_more_than_two_mismatches_returns_none() -> None:
     assert _score_equal_length_match("abcde", "axxyz") is None
+
+
+@pytest.mark.parametrize(
+    ("query", "target", "expected_score"),
+    [
+        ("xabc", "abc", -4),
+        ("abxc", "abc", 0),
+        ("abcx", "abc", 2),
+    ],
+)
+def test_extra_character_match(
+    query: str,
+    target: str,
+    expected_score: int,
+) -> None:
+    assert _score_extra_character_match(query, target) == expected_score
+
+
+def test_extra_character_position_counts_spaces() -> None:
+    assert _score_extra_character_match("to xbe", "to be") == 6
+
+
+def test_extra_character_match_rejects_second_mismatch() -> None:
+    assert _score_extra_character_match("abxd", "acd") is None
+
+
+def test_extra_repeated_character_uses_highest_scoring_alignment() -> None:
+    assert _score_extra_character_match("aaab", "aab") == 0
+
+
+@pytest.mark.parametrize(
+    ("query", "target", "expected_score"),
+    [
+        ("abc", "xabc", -4),
+        ("abc", "abxc", 0),
+        ("abc", "abcx", 2),
+    ],
+)
+def test_missing_character_match(
+    query: str,
+    target: str,
+    expected_score: int,
+) -> None:
+    assert _score_missing_character_match(query, target) == expected_score
+
+
+def test_missing_character_position_counts_spaces() -> None:
+    assert _score_missing_character_match("tobe", "to be") == 2
+
+
+def test_missing_character_match_rejects_second_mismatch() -> None:
+    assert _score_missing_character_match("acd", "abxd") is None
+
+
+def test_missing_repeated_character_uses_highest_scoring_alignment() -> None:
+    assert _score_missing_character_match("aab", "aaab") == 0
