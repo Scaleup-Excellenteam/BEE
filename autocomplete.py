@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from src.corpus.normalizer import normalize_text
+from src.matching.matcher import calculate_best_match
+from src.models import AutoCompleteData
+
 
 _corpus_index = None
 
