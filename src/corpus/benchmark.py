@@ -47,17 +47,32 @@ def process_memory_bytes() -> int | None:
                 ("PeakPagefileUsage", ctypes.c_size_t),
             ]
 
+        kernel32 = ctypes.WinDLL("kernel32")
+        psapi = ctypes.WinDLL("psapi")
+
+        # The argument types matter: a process HANDLE is pointer sized, and
+        # letting ctypes guess passes it as a 32-bit int, which makes the
+        # call fail silently on 64-bit Python.
+        kernel32.GetCurrentProcess.argtypes = []
+        kernel32.GetCurrentProcess.restype = ctypes.c_void_p
+        psapi.GetProcessMemoryInfo.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(_MemoryCounters),
+            ctypes.c_ulong,
+        ]
+        psapi.GetProcessMemoryInfo.restype = ctypes.c_int
+
         counters = _MemoryCounters()
         counters.cb = ctypes.sizeof(_MemoryCounters)
 
-        succeeded = ctypes.windll.psapi.GetProcessMemoryInfo(
-            ctypes.windll.kernel32.GetCurrentProcess(),
+        succeeded = psapi.GetProcessMemoryInfo(
+            kernel32.GetCurrentProcess(),
             ctypes.byref(counters),
             counters.cb,
         )
         if succeeded:
             return int(counters.WorkingSetSize)
-    except Exception:
+    except (AttributeError, OSError):
         pass
 
     return None
