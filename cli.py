@@ -20,12 +20,18 @@ def main() -> None:
 
         results = get_best_k_completions(current_input)
 
-        for result in results:
-            print(f"Completed sentence: {result.completed_sentence}")
-            print(f"Source: {result.source_text}")
-            print(f"Offset: {result.offset}")
-            print(f"Score: {result.score}")
-            print()
+        if not results:
+            print("No suggestions found.")
+            continue
+
+        print(f"Here are {len(results)} suggestions:")
+
+        for position, result in enumerate(results, start=1):
+            print(
+                f"{position}. {result.completed_sentence} "
+                f"({result.source_text}:{result.offset}, "
+                f"score={result.score})"
+            )
 
 
 if __name__ == "__main__":

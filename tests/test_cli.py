@@ -77,20 +77,15 @@ def test_hash_resets_input_without_running_autocomplete_for_hash(
     ]
 
 
-def test_displays_all_result_fields(monkeypatch, capsys):
+def _run_cli_with_results(monkeypatch, capsys, results):
+    """Run one query through the CLI and return everything it printed."""
     fake_input = Mock(
         side_effect=[
             "prefix",
             EOFError(),
         ]
     )
-    result = FakeAutoCompleteData(
-        completed_sentence="Completed sentence text",
-        source_text="corpus/source.txt",
-        offset=42,
-        score=-3,
-    )
-    get_best_k_completions = Mock(return_value=[result])
+    get_best_k_completions = Mock(return_value=results)
 
     monkeypatch.setattr("builtins.input", fake_input)
     monkeypatch.setattr(
@@ -102,12 +97,52 @@ def test_displays_all_result_fields(monkeypatch, capsys):
     with pytest.raises(EOFError):
         cli.main()
 
-    output = capsys.readouterr().out
+    return capsys.readouterr().out
 
-    assert "Completed sentence: Completed sentence text" in output
-    assert "Source: corpus/source.txt" in output
-    assert "Offset: 42" in output
-    assert "Score: -3" in output
+
+def test_displays_all_result_fields(monkeypatch, capsys):
+    result = FakeAutoCompleteData(
+        completed_sentence="Completed sentence text",
+        source_text="corpus/source.txt",
+        offset=42,
+        score=-3,
+    )
+
+    output = _run_cli_with_results(monkeypatch, capsys, [result])
+
+    assert "Here are 1 suggestions:" in output
+    assert (
+        "1. Completed sentence text (corpus/source.txt:42, score=-3)"
+        in output
+    )
+
+
+def test_numbers_suggestions_in_returned_order(monkeypatch, capsys):
+    results = [
+        FakeAutoCompleteData(
+            completed_sentence=f"Sentence {position}",
+            source_text="example.txt",
+            offset=position,
+            score=14,
+        )
+        for position in range(1, 6)
+    ]
+
+    output = _run_cli_with_results(monkeypatch, capsys, results)
+
+    assert "Here are 5 suggestions:" in output
+    for position in range(1, 6):
+        assert (
+            f"{position}. Sentence {position} "
+            f"(example.txt:{position}, score=14)"
+        ) in output
+
+
+def test_reports_when_no_suggestions_are_found(monkeypatch, capsys):
+    output = _run_cli_with_results(monkeypatch, capsys, [])
+
+    assert "No suggestions found." in output
+    assert "suggestions:" not in output
 
 
 def test_cli_does_not_call_lower_level_dependencies(monkeypatch):
