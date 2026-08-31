@@ -1,0 +1,1373 @@
+# Google Autocomplete Project — Updated Team SPEC
+
+## 1. Project Goal
+
+Build an autocomplete system that:
+
+* Loads a corpus of text files in an offline initialization stage.
+* Accepts user input in an online stage.
+* Finds sentences that contain the normalized query as a substring.
+* Also supports at most one allowed edit:
+
+  * substitution
+  * insertion
+  * deletion
+* Calculates a score according to the official specification.
+* Returns the best 5 completions.
+* Sorts equal-score results alphabetically.
+
+---
+
+# 2. System Lifecycle
+
+The system has two main phases.
+
+## Phase 1 — Offline Initialization
+
+The system:
+
+1. Receives Archive.zip.
+2. Extracts the archive.
+3. Recursively finds all .txt files.
+4. Reads every file line by line.
+5. Treats every line as one sentence.
+6. Stores the original sentence and metadata.
+7. Creates a normalized version of each sentence.
+8. Builds the corpus/index.
+9. Keeps the initialized index in memory for the online stage.
+
+The corpus/index must be built once.
+
+It must NOT be rebuilt for every autocomplete query.
+
+Conceptually:
+
+text
+Archive.zip
+    ↓
+Extract
+    ↓
+Recursive file scan
+    ↓
+Read all sentences
+    ↓
+Normalize
+    ↓
+Build index
+    ↓
+Initialize AutoComplete Engine
+    ↓
+READY
+
+
+---
+
+## Phase 2 — Online Completion
+
+For every user query:
+
+text
+User input
+    ↓
+Normalize query
+    ↓
+Get candidate sentences
+    ↓
+Verify 0-edit / 1-edit match
+    ↓
+Calculate scores
+    ↓
+Create AutoCompleteData
+    ↓
+Sort
+    ↓
+Return Top 5
+
+
+The already initialized corpus/index must be reused.
+
+---
+
+# 3. Shared Models
+
+These models are shared contracts and must not be changed without team agreement.
+
+python
+from dataclasses import dataclass
+
+
+@dataclass
+class SentenceRecord:
+    original_sentence: str
+    normalized_sentence: str
+    source_text: str
+    offset: int
+
+
+@dataclass
+class AutoCompleteData:
+    completed_sentence: str
+    source_text: str
+    offset: int
+    score: int
+
+
+---
+
+# 4. Shared Data Rules
+
+## Requirement
+
+offset represents the location/line of the sentence inside the source file.
+
+## Team Decision
+
+We use:
+
+text
+1-based line numbering
+
+
+Therefore:
+
+text
+first line  -> offset = 1
+second line -> offset = 2
+
+
+---
+
+## original_sentence
+
+original_sentence must preserve the source sentence exactly as it appeared in the file, except for the physical line-ending characters.
+
+For example, if the file contains:
+
+text
+Hello, WORLD!!!\n
+
+
+we store:
+
+text
+Hello, WORLD!!!
+
+
+We do NOT lowercase it.
+
+We do NOT remove punctuation.
+
+We do NOT collapse spaces in the original version.
+
+---
+
+## normalized_sentence
+
+Used only for matching/searching.
+
+It must never replace or overwrite original_sentence.
+
+---
+
+## source_text
+
+### Team Decision
+
+Use a consistent relative path.
+
+Example:
+
+text
+Archive/books/hamlet.txt
+
+
+Do not store machine-specific paths such as:
+
+text
+C:\Users\name\Desktop\project\Archive\books\hamlet.txt
+
+
+This keeps results consistent across team members' machines.
+
+---
+
+# 5. PERSON 1 — Offline / Archive / Corpus / Normalization / Index
+
+## Responsibility
+
+Person 1 owns the complete offline data-preparation pipeline.
+
+Person 1 is responsible for:
+
+* Handling Archive.zip.
+* Extracting it.
+* Recursively finding all .txt files.
+* Reading text files.
+* Treating each physical line as a sentence.
+* Preserving the original sentence.
+* Normalizing the searchable sentence.
+* Storing source path.
+* Storing offset.
+* Building the corpus/index.
+* Providing candidate sentences for the online engine.
+* Ensuring that candidate optimization never removes a valid possible match.
+
+Person 1 does NOT:
+
+* calculate scores
+* verify final edit-distance matching
+* sort Top 5
+* create CLI output
+
+---
+
+# 6. Person 1 — Archive Initialization API
+
+Recommended initialization contract:
+
+python
+def initialize_corpus(archive_path: str) -> "CorpusIndex":
+    ...
+
+
+Example:
+
+python
+index = initialize_corpus("Archive.zip")
+
+
+The function should conceptually perform:
+
+text
+ZIP
+↓
+Extract
+↓
+Load corpus
+↓
+Normalize corpus
+↓
+Build index
+↓
+Return initialized CorpusIndex
+
+
+The exact internal extraction directory is an implementation detail.
+
+---
+
+# 7. Person 1 — ZIP Handling
+
+Input:
+
+text
+Archive.zip
+
+
+Person 1 must extract the ZIP before corpus scanning.
+
+Possible conceptual API:
+
+python
+def extract_archive(
+    archive_path: str,
+    destination_path: str
+) -> str:
+    ...
+
+
+The returned path points to the extracted corpus root.
+
+Security note:
+
+Archive extraction must avoid unsafe path traversal outside the intended extraction directory.
+
+---
+
+# 8. Person 1 — Text Normalization
+
+## API
+
+python
+def normalize_text(text: str) -> str:
+    ...
+
+
+The same function must be used for:
+
+text
+corpus sentences
+AND
+user queries
+
+
+Person 3 must call this function and must not implement a different normalization algorithm.
+
+---
+
+## Official Normalization Requirements
+
+According to the project specification:
+
+1. Ignore case.
+2. Ignore punctuation.
+3. Collapse repeated spaces between words.
+4. Spaces count as characters after normalization.
+
+Example:
+
+text
+Original:
+To be or not to be, that is the question.
+
+
+Normalized representation should be equivalent to:
+
+text
+to be or not to be that is the question
+
+
+---
+
+## Important Normalization Decision
+
+The project wording says punctuation should be ignored, but exact punctuation replacement semantics must be fixed by the team.
+
+Example:
+
+text
+hello,world
+
+
+Possible interpretations:
+
+text
+helloworld
+
+
+or:
+
+text
+hello world
+
+
+This must be defined once and tested consistently.
+
+### TEAM DECISION
+
+The final normalization behavior must be documented before implementation is frozen.
+
+Once selected:
+
+text
+corpus normalization
+=
+query normalization
+
+
+must always use the exact same logic.
+
+---
+
+# 9. Person 1 — Corpus Loader
+
+## API
+
+python
+def load_corpus(root_path: str) -> list[SentenceRecord]:
+    ...
+
+
+## Requirements
+
+The loader must:
+
+1. Recursively traverse the directory tree.
+2. Find every .txt file.
+3. Ignore unrelated file types.
+4. Open every text file.
+5. Read files line by line.
+6. Treat each line as one source sentence.
+7. Preserve original line numbering.
+8. Create a SentenceRecord for each stored sentence.
+9. Store a consistent relative source path.
+
+---
+
+## Example
+
+File:
+
+text
+Archive/books/book.txt
+
+
+Content:
+
+text
+Hello World!
+To be or not to be.
+Good Morning.
+
+
+Expected records:
+
+python
+[
+    SentenceRecord(
+        original_sentence="Hello World!",
+        normalized_sentence="hello world",
+        source_text="Archive/books/book.txt",
+        offset=1
+    ),
+    SentenceRecord(
+        original_sentence="To be or not to be.",
+        normalized_sentence="to be or not to be",
+        source_text="Archive/books/book.txt",
+        offset=2
+    ),
+    SentenceRecord(
+        original_sentence="Good Morning.",
+        normalized_sentence="good morning",
+        source_text="Archive/books/book.txt",
+        offset=3
+    )
+]
+
+
+---
+
+# 10. Empty Lines
+
+The assignment does not explicitly define empty-line behavior.
+
+Therefore this must be marked as:
+
+text
+TEAM DECISION
+
+
+Recommended decision:
+
+* Ignore physically empty lines.
+* Preserve the original source line numbers.
+
+Example:
+
+text
+1: Hello
+2:
+3: World
+
+
+Stored records:
+
+text
+Hello -> offset 1
+World -> offset 3
+
+
+Not:
+
+text
+World -> offset 2
+
+
+---
+
+# 11. Empty Normalized Query
+
+The assignment does not explicitly define how an empty normalized user query should behave.
+
+This must also be marked as:
+
+text
+TEAM DECISION
+
+
+Possible decisions include:
+
+* Return an empty result list.
+* Wait until at least one searchable character exists.
+
+The team must choose one behavior and test it.
+
+---
+
+# 12. Person 1 — CorpusIndex
+
+## Required Public Interface
+
+python
+class CorpusIndex:
+
+    def __init__(
+        self,
+        records: list[SentenceRecord]
+    ):
+        ...
+
+    def get_candidates(
+        self,
+        query: str
+    ) -> list[SentenceRecord]:
+        ...
+
+
+query is already normalized.
+
+---
+
+# 13. Candidate Retrieval Contract
+
+This rule is critical.
+
+get_candidates(query) may return extra candidates.
+
+However, it MUST NOT omit any sentence that could legally match the query using:
+
+text
+0 edits
+or
+1 allowed edit
+
+
+In other words:
+
+text
+False positives  -> allowed
+False negatives  -> forbidden
+
+
+Person 2 performs the final verification.
+
+Therefore the index is only a candidate-filtering mechanism.
+
+It must never become the final authority on whether a sentence matches.
+
+---
+
+# 14. Reference Implementation
+
+The first implementation should prioritize correctness.
+
+A valid initial implementation is:
+
+python
+class CorpusIndex:
+
+    def __init__(self, records):
+        self.records = records
+
+    def get_candidates(self, query):
+        return self.records
+
+
+This is a brute-force reference version.
+
+It may be slow, but it provides a correctness baseline.
+
+---
+
+# 15. Future Optimized Index
+
+After correctness is verified, Person 1 may implement candidate filtering such as:
+
+text
+n-gram index
+inverted index
+substring-oriented index
+other safe candidate filtering
+
+
+The public API must remain unchanged.
+
+Most importantly:
+
+text
+Optimized get_candidates()
+must preserve all valid possible matches.
+
+
+---
+
+# 16. PERSON 2 — Matching / Edit Handling / Scoring
+
+## Responsibility
+
+Person 2 receives:
+
+text
+normalized query
++
+normalized sentence
+
+
+and returns:
+
+text
+best valid score
+
+
+or:
+
+python
+None
+
+
+if no legal match exists.
+
+---
+
+# 17. Person 2 — Main API
+
+python
+def calculate_best_match(
+    query: str,
+    sentence: str
+) -> int | None:
+    ...
+
+
+Person 2 does NOT:
+
+* perform normalization
+* read files
+* know source paths
+* know offsets
+* create AutoCompleteData
+
+---
+
+# 18. Valid Match Types
+
+The query may match anywhere inside the sentence.
+
+The system supports:
+
+text
+1. Exact substring match
+2. One substitution
+3. One extra character in the query
+4. One missing character in the query
+
+
+Maximum:
+
+text
+1 edit
+
+
+More than one edit means:
+
+python
+None
+
+
+---
+
+# 19. Scoring Formula
+
+text
+score =
+2 × matching_characters
+-
+edit_penalty
+
+
+For an exact match:
+
+text
+edit_penalty = 0
+
+
+The incorrect, extra, or missing character earns no matching points.
+
+---
+
+# 20. Character Position Rules
+
+This must be explicit.
+
+Edit positions are:
+
+text
+1-based
+
+
+and calculated on the:
+
+text
+normalized query
+
+
+Spaces count as characters.
+
+Example:
+
+text
+"to be"
+
+
+Positions:
+
+text
+t  o     b  e
+1  2  3  4  5
+
+
+---
+
+# 21. Missing Character Position
+
+For a missing character, the position is the location where that missing character would be inserted into the normalized query.
+
+Example:
+
+text
+query:
+or nt
+
+target:
+or not
+
+
+The missing o would be inserted at position:
+
+text
+5
+
+
+Therefore the position-5 insertion/deletion penalty applies.
+
+---
+
+# 22. Substitution Penalty
+
+text
+Position 1 -> 5
+Position 2 -> 4
+Position 3 -> 3
+Position 4 -> 2
+Position 5+ -> 1
+
+
+Suggested API:
+
+python
+def substitution_penalty(position: int) -> int:
+    ...
+
+
+---
+
+# 23. Insertion / Deletion Penalty
+
+text
+Position 1 -> 10
+Position 2 -> 8
+Position 3 -> 6
+Position 4 -> 4
+Position 5+ -> 2
+
+
+Suggested API:
+
+python
+def insertion_deletion_penalty(position: int) -> int:
+    ...
+
+
+---
+
+# 24. No-Match Contract
+
+This rule is important:
+
+python
+None
+
+
+is the ONLY value that means:
+
+text
+no valid match
+
+
+Do NOT reject a result merely because:
+
+text
+score == 0
+
+
+or:
+
+text
+score < 0
+
+
+A zero or negative score can still represent a valid match according to the scoring rules.
+
+Therefore incorrect logic:
+
+python
+if score <= 0:
+    reject
+
+
+Correct logic:
+
+python
+if score is None:
+    reject
+
+
+---
+
+# 25. Multiple Matches in One Sentence
+
+If the same query can match the same sentence in several positions, Person 2 must return:
+
+text
+the highest valid score
+
+
+Do not automatically stop after the first possible match.
+
+---
+
+# 26. Golden Tests — Official Appendix
+
+Sentence:
+
+text
+To be or not to be, that is the question.
+
+
+The following official examples must be included as Golden Tests.
+
+| Query      | Expected Result |
+| ---------- | --------------: |
+| To be    |            10 |
+| or Not   |            12 |
+| be, that |            14 |
+| 2o be    |             3 |
+| to pe    |             6 |
+| or knot  |             8 |
+| or nt    |             8 |
+| not be   |          None |
+
+These tests are part of the correctness baseline.
+
+Any future optimized implementation must continue to pass them.
+
+---
+
+# 27. PERSON 3 — Online Autocomplete / Integration / CLI
+
+## Responsibility
+
+Person 3 connects the offline data layer with the matching/scoring layer and provides the final required API.
+
+---
+
+# 28. Person 3 — Main API
+
+python
+def get_best_k_completions(
+    prefix: str
+) -> list[AutoCompleteData]:
+    ...
+
+
+The engine must use an already initialized index.
+
+It must NOT rebuild the corpus or index on every call.
+
+---
+
+# 29. Person 3 — Online Flow
+
+text
+prefix
+↓
+normalize_text(prefix)
+↓
+index.get_candidates(query)
+↓
+for every candidate
+↓
+calculate_best_match(
+    query,
+    candidate.normalized_sentence
+)
+↓
+score / None
+↓
+create AutoCompleteData
+↓
+sort
+↓
+Top 5
+
+
+---
+
+# 30. AutoCompleteData Construction
+
+For a valid match:
+
+python
+AutoCompleteData(
+    completed_sentence=candidate.original_sentence,
+    source_text=candidate.source_text,
+    offset=candidate.offset,
+    score=score
+)
+
+
+completed_sentence must be the original source sentence.
+
+Not the normalized version.
+
+---
+
+# 31. Sorting Contract
+
+Primary sort:
+
+text
+score descending
+
+
+Higher scores first.
+
+Tie-breaker:
+
+text
+completed_sentence alphabetical ascending
+
+
+Then return:
+
+text
+maximum 5 results
+
+
+If fewer than 5 valid results exist, return only those results.
+
+---
+
+# 32. CLI Contract
+
+After initialization:
+
+text
+The system is ready. Enter your text:
+
+
+The user can continue typing from the previous input.
+
+Example:
+
+text
+input:
+this
+
+
+Current accumulated query:
+
+text
+this
+
+
+Next input:
+
+text
+ is
+
+
+Current accumulated query becomes:
+
+text
+this is
+
+
+Autocomplete runs again using the accumulated query.
+
+---
+
+# 33. # Behavior
+
+If the user enters:
+
+text
+#
+
+
+the current sentence/query is finished.
+
+Reset:
+
+python
+current_input = ""
+
+
+The next text begins a new autocomplete sequence.
+
+---
+
+# 34. CLI Output Contract
+
+Each displayed suggestion must include:
+
+text
+original completed sentence
+source path
+offset
+score
+
+
+Example:
+
+text
+To be or not to be, that is the question.
+(Archive/books/hamlet.txt:42, score=10)
+
+
+Exact visual formatting may be a Team Decision.
+
+However, all four pieces of information are required.
+
+---
+
+# 35. Requirement vs Team Decision
+
+The SPEC should clearly distinguish between official requirements and internal implementation decisions.
+
+Examples:
+
+## Official Requirement
+
+text
+Each line in a source file is a sentence.
+
+
+## Official Requirement
+
+text
+Case, punctuation, and repeated spaces should not prevent matching.
+
+
+## Team Decision
+
+text
+Ignore empty physical lines.
+
+
+## Team Decision
+
+text
+Use relative source paths.
+
+
+## Team Decision
+
+text
+Return [] for an empty normalized query.
+
+
+Team Decisions may change before implementation freeze.
+
+Official Requirements may not.
+
+---
+
+# 36. Performance Plan
+
+Correctness comes first.
+
+Development should follow this order:
+
+text
+1. Build a correct reference implementation
+2. Pass all unit tests and Golden Tests
+3. Run benchmarks
+4. Profile actual bottlenecks
+5. Optimize only where justified
+6. Compare optimized results against the reference implementation
+
+
+---
+
+# 37. Reference vs Optimized Correctness Contract
+
+For the same corpus and query:
+
+text
+Reference implementation
+
+
+and:
+
+text
+Optimized implementation
+
+
+must return the same logical Top 5 results:
+
+text
+same sentences
+same scores
+same ordering
+same source
+same offset
+
+
+Optimization is allowed to change performance.
+
+Optimization is NOT allowed to change correctness.
+
+---
+
+# 38. Technology Decisions
+
+## Core Language
+
+Initial implementation:
+
+text
+Python
+
+
+Reason:
+
+* Required completion function is in Python.
+* Faster team development.
+* Easier testing.
+* Easier profiling.
+* Avoid unnecessary integration complexity before correctness is proven.
+
+---
+
+## AI / Gemini
+
+Gemini or another LLM may be used as:
+
+text
+development assistance
+
+
+for:
+
+* research
+* algorithm exploration
+* test generation
+* implementation suggestions
+* code review
+
+However, the team must understand and verify all generated code.
+
+---
+
+## C++
+
+C++ should NOT be introduced by default.
+
+Only consider C++ if profiling proves that:
+
+text
+a specific computational bottleneck
+
+
+cannot meet the required performance reasonably in Python.
+
+Do not optimize based only on assumptions.
+
+---
+
+## Protobuf
+
+Protobuf is not required for the core Part A solution.
+
+Only consider it if the architecture later introduces a real:
+
+text
+cross-process
+or
+cross-service
+communication boundary
+
+
+---
+
+## Cloud Run
+
+Cloud Run may be considered later as an optional Google-oriented showcase.
+
+It is NOT part of the core correctness requirements for Part A.
+
+Deployment work should not delay:
+
+text
+matching correctness
+scoring correctness
+offline initialization
+Top 5 correctness
+performance validation
+
+
+---
+
+# 39. Final Public Contracts
+
+These interfaces must remain stable unless the whole team agrees to change them.
+
+## Person 1
+
+python
+def normalize_text(text: str) -> str:
+    ...
+
+
+python
+def load_corpus(
+    root_path: str
+) -> list[SentenceRecord]:
+    ...
+
+
+python
+class CorpusIndex:
+
+    def get_candidates(
+        self,
+        query: str
+    ) -> list[SentenceRecord]:
+        ...
+
+
+Recommended initialization API:
+
+python
+def initialize_corpus(
+    archive_path: str
+) -> CorpusIndex:
+    ...
+
+
+---
+
+## Person 2
+
+python
+def calculate_best_match(
+    query: str,
+    sentence: str
+) -> int | None:
+    ...
+
+
+---
+
+## Person 3
+
+python
+def get_best_k_completions(
+    prefix: str
+) -> list[AutoCompleteData]:
+    ...
+
+
+---
+
+# 40. Responsibility Summary
+
+## Person 1
+
+text
+Offline initialization
+Archive.zip
+ZIP extraction
+Recursive scanning
+Text loading
+Normalization implementation
+Original sentence preservation
+Source path
+Offset
+Corpus
+Index
+Candidate retrieval
+Candidate completeness guarantee
+
+
+## Person 2
+
+text
+Exact substring matching
+Substitution
+Insertion
+Deletion
+Edit position rules
+Penalties
+Score calculation
+Highest valid score
+No-match decision
+Golden matching tests
+
+
+## Person 3
+
+text
+Online completion
+Use initialized index
+Query normalization call
+Candidate integration
+Matcher integration
+AutoCompleteData
+Sorting
+Alphabetical tie-break
+Top 5
+CLI
+Accumulated input
+# reset
+Output formatting
+Integration tests
+
+
+---
+
+# Final Architecture
+
+text
+Archive.zip
+     ↓
+PERSON 1
+Offline Initialization
+Corpus + Normalization + Index
+     ↓
+Initialized CorpusIndex
+     ↓
+PERSON 3
+Online Autocomplete Engine
+     ↓
+Candidates
+     ↓
+PERSON 2
+Matching + Scoring
+     ↓
+score / None
+     ↓
+PERSON 3
+AutoCompleteData
+Sort
+Top 5
+CLI Output
+
+
+The main principle is:
+
+text
+Person 1 prepares and safely narrows the data.
+Person 2 verifies correctness and calculates scores.
+Person 3 connects the system and produces the final user-facing results.
