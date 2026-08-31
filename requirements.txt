@@ -1,0 +1,5 @@
+# Part B (semantic search) runtime dependencies.
+# Part A (corpus, matching, CLI) needs none of these and runs on the
+# standard library alone.
+google-genai>=2.10.0
+numpy>=2.0
