@@ -1,4 +1,4 @@
-"""Internal matching helpers for normalized query and target strings."""
+"""Match normalized queries against normalized candidate sentences."""
 
 from src.matching.scoring import (
     exact_match_score,
@@ -76,3 +76,46 @@ def _score_missing_character_match(query: str, target: str) -> int | None:
         missing_position = query_index + 1
 
     return missing_character_score(len(query), missing_position)
+
+
+def calculate_best_match(query: str, sentence: str) -> int | None:
+    """Return the highest score for a legal substring match, or ``None``."""
+    if query == "" or sentence == "":
+        return None
+
+    query_length = len(query)
+    exact_score = exact_match_score(query_length)
+    window_scorers = [
+        (query_length, _score_equal_length_match),
+    ]
+
+    # Temporary team decision: a one-character query does not use empty windows.
+    if query_length - 1 > 0:
+        window_scorers.append(
+            (query_length - 1, _score_extra_character_match),
+        )
+
+    window_scorers.append(
+        (query_length + 1, _score_missing_character_match),
+    )
+
+    best_score = None
+
+    for window_length, score_window in window_scorers:
+        if window_length > len(sentence):
+            continue
+
+        for start in range(len(sentence) - window_length + 1):
+            target = sentence[start : start + window_length]
+            score = score_window(query, target)
+
+            if score is None:
+                continue
+
+            if window_length == query_length and score == exact_score:
+                return score
+
+            if best_score is None or score > best_score:
+                best_score = score
+
+    return best_score
