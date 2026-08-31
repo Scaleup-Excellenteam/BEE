@@ -3,3 +3,6 @@ extracted_archive/
 __pycache__/
 .pytest_cache/
 logs/
+.env
+.env.*
+embedding_cache/
