@@ -1,11 +1,13 @@
 """Tests for Spec 3 autocomplete orchestration."""
 
 from dataclasses import dataclass
+from itertools import product
 from unittest.mock import Mock, call
 
 import pytest
 
 import autocomplete
+from src.matching.matcher import calculate_best_match as reference_matcher
 
 
 @dataclass
@@ -47,6 +49,11 @@ def fake_dependencies(monkeypatch):
         "AutoCompleteData",
         auto_complete_data,
         raising=False,
+    )
+    monkeypatch.setattr(
+        autocomplete,
+        "passes_partition_filter",
+        Mock(return_value=True),
     )
 
     return normalize_text, calculate_best_match, auto_complete_data
@@ -237,3 +244,120 @@ def test_reuses_the_configured_index_reference(fake_dependencies):
         call("first query"),
         call("second query"),
     ]
+
+
+def test_five_exact_matches_return_top_five_without_running_matcher(
+    fake_dependencies,
+):
+    normalize_text, calculate_best_match, _ = fake_dependencies
+    normalize_text.return_value = "query"
+
+    candidates = [
+        FakeSentenceRecord("Zulu", "query zulu", "z.txt", 1),
+        FakeSentenceRecord("Beta", "beta query", "b.txt", 2),
+        FakeSentenceRecord("Alpha", "alpha query", "a.txt", 3),
+        FakeSentenceRecord("Delta", "delta query", "d.txt", 4),
+        FakeSentenceRecord("Echo", "query echo", "e.txt", 5),
+        FakeSentenceRecord("Foxtrot", "foxtrot query", "f.txt", 6),
+    ]
+    index = Mock()
+    index.get_candidates.return_value = candidates
+    autocomplete.set_corpus_index(index)
+
+    results = autocomplete.get_best_k_completions("QUERY!")
+
+    calculate_best_match.assert_not_called()
+    assert results == [
+        FakeAutoCompleteData("Alpha", "a.txt", 3, 10),
+        FakeAutoCompleteData("Beta", "b.txt", 2, 10),
+        FakeAutoCompleteData("Delta", "d.txt", 4, 10),
+        FakeAutoCompleteData("Echo", "e.txt", 5, 10),
+        FakeAutoCompleteData("Foxtrot", "f.txt", 6, 10),
+    ]
+
+
+def test_fewer_than_five_exact_matches_preserve_approximate_results(
+    monkeypatch,
+):
+    candidates = [
+        FakeSentenceRecord("Exact", "hello there", "exact.txt", 1),
+        FakeSentenceRecord("Missing", "hellxo", "missing.txt", 2),
+        FakeSentenceRecord("Extra", "hell", "extra.txt", 3),
+        FakeSentenceRecord("Substitution", "hxllo", "sub.txt", 4),
+        FakeSentenceRecord("Filtered", "zzzzz", "filtered.txt", 5),
+    ]
+    index = Mock()
+    index.get_candidates.return_value = candidates
+    matcher = Mock(wraps=reference_matcher)
+
+    monkeypatch.setattr(autocomplete, "normalize_text", lambda prefix: "hello")
+    monkeypatch.setattr(autocomplete, "calculate_best_match", matcher)
+    autocomplete.set_corpus_index(index)
+
+    results = autocomplete.get_best_k_completions("HELLO!")
+
+    assert matcher.call_args_list == [
+        call("hello", "hello there"),
+        call("hello", "hellxo"),
+        call("hello", "hell"),
+        call("hello", "hxllo"),
+    ]
+    assert results == [
+        autocomplete.AutoCompleteData("Exact", "exact.txt", 1, 10),
+        autocomplete.AutoCompleteData("Missing", "missing.txt", 2, 8),
+        autocomplete.AutoCompleteData("Extra", "extra.txt", 3, 6),
+        autocomplete.AutoCompleteData("Substitution", "sub.txt", 4, 4),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("query", "sentence"),
+    [
+        ("abcde", "xxabcdeyy"),
+        ("abcde", "xxabxdeyy"),
+        ("abcd", "xxabxcdyy"),
+        ("abxcd", "xxabcdyy"),
+        ("aaab", "xxaabyy"),
+        ("to be", "xxto bx yy"),
+        ("a", ""),
+    ],
+    ids=[
+        "exact",
+        "substitution",
+        "missing-character",
+        "extra-character",
+        "repeated-characters",
+        "spaces",
+        "short-query",
+    ],
+)
+def test_partition_filter_preserves_one_edit_match_types(
+    query,
+    sentence,
+):
+    assert autocomplete.passes_partition_filter(query, sentence)
+
+
+def test_partition_filter_rejects_an_unsafe_candidate():
+    assert not autocomplete.passes_partition_filter("abcd", "axyd")
+
+
+def test_partition_filter_is_exhaustively_safe_for_short_strings():
+    alphabet = "ab "
+
+    for query_length in range(1, 6):
+        for query_characters in product(alphabet, repeat=query_length):
+            query = "".join(query_characters)
+
+            for sentence_length in range(7):
+                for sentence_characters in product(
+                    alphabet,
+                    repeat=sentence_length,
+                ):
+                    sentence = "".join(sentence_characters)
+
+                    if reference_matcher(query, sentence) is not None:
+                        assert autocomplete.passes_partition_filter(
+                            query,
+                            sentence,
+                        ), (query, sentence)
