@@ -1,5 +1,6 @@
 """Tests for the Spec 3 command-line interface."""
 
+import sys
 from dataclasses import dataclass
 from unittest.mock import Mock, call
 
@@ -20,66 +21,123 @@ def test_prints_readiness_message_and_accumulates_input_exactly(
     monkeypatch,
     capsys,
 ):
-    fake_input = Mock(
+    read_prefilled_input = Mock(
         side_effect=[
             "this",
-            " is",
+            "this is",
             EOFError(),
         ]
     )
     get_best_k_completions = Mock(return_value=[])
 
-    monkeypatch.setattr("builtins.input", fake_input)
+    monkeypatch.setattr(
+        cli,
+        "_read_prefilled_input",
+        read_prefilled_input,
+    )
     monkeypatch.setattr(
         cli,
         "get_best_k_completions",
         get_best_k_completions,
     )
 
-    with pytest.raises(EOFError):
-        cli.main()
+    cli.main()
 
     output = capsys.readouterr().out
 
-    assert "The system is ready. Enter your text:" in output
+    assert output.splitlines() == [
+        "The system is ready. Enter your text:",
+        "No suggestions found.",
+        "No suggestions found.",
+    ]
+    assert "Current text:" not in output
+    assert "Continue typing:" not in output
+    assert read_prefilled_input.call_args_list == [
+        call(""),
+        call("this"),
+        call("this is"),
+    ]
     assert get_best_k_completions.call_args_list == [
         call("this"),
         call("this is"),
     ]
 
 
-def test_hash_resets_input_without_running_autocomplete_for_hash(
+@pytest.mark.parametrize(
+    "terminated_input",
+    [
+        "#",
+        "this is the fix option#",
+        "this is #",
+        "hello#world",
+    ],
+)
+def test_hash_anywhere_resets_without_running_autocomplete(
     monkeypatch,
+    terminated_input,
 ):
-    fake_input = Mock(
+    read_prefilled_input = Mock(
         side_effect=[
-            "hello",
-            "#",
-            "world",
+            terminated_input,
             EOFError(),
         ]
     )
     get_best_k_completions = Mock(return_value=[])
 
-    monkeypatch.setattr("builtins.input", fake_input)
+    monkeypatch.setattr(
+        cli,
+        "_read_prefilled_input",
+        read_prefilled_input,
+    )
     monkeypatch.setattr(
         cli,
         "get_best_k_completions",
         get_best_k_completions,
     )
 
-    with pytest.raises(EOFError):
-        cli.main()
+    cli.main()
 
-    assert get_best_k_completions.call_args_list == [
+    get_best_k_completions.assert_not_called()
+    assert read_prefilled_input.call_args_list == [
+        call(""),
+        call(""),
+    ]
+
+
+def test_text_after_hash_starts_from_empty_state(monkeypatch):
+    read_prefilled_input = Mock(
+        side_effect=[
+            "this is#",
+            "hello",
+            EOFError(),
+        ]
+    )
+    get_best_k_completions = Mock(return_value=[])
+
+    monkeypatch.setattr(
+        cli,
+        "_read_prefilled_input",
+        read_prefilled_input,
+    )
+    monkeypatch.setattr(
+        cli,
+        "get_best_k_completions",
+        get_best_k_completions,
+    )
+
+    cli.main()
+
+    get_best_k_completions.assert_called_once_with("hello")
+    assert read_prefilled_input.call_args_list == [
+        call(""),
+        call(""),
         call("hello"),
-        call("world"),
     ]
 
 
 def _run_cli_with_results(monkeypatch, capsys, results):
     """Run one query through the CLI and return everything it printed."""
-    fake_input = Mock(
+    read_prefilled_input = Mock(
         side_effect=[
             "prefix",
             EOFError(),
@@ -87,15 +145,18 @@ def _run_cli_with_results(monkeypatch, capsys, results):
     )
     get_best_k_completions = Mock(return_value=results)
 
-    monkeypatch.setattr("builtins.input", fake_input)
+    monkeypatch.setattr(
+        cli,
+        "_read_prefilled_input",
+        read_prefilled_input,
+    )
     monkeypatch.setattr(
         cli,
         "get_best_k_completions",
         get_best_k_completions,
     )
 
-    with pytest.raises(EOFError):
-        cli.main()
+    cli.main()
 
     return capsys.readouterr().out
 
@@ -145,8 +206,42 @@ def test_reports_when_no_suggestions_are_found(monkeypatch, capsys):
     assert "suggestions:" not in output
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows console test")
+def test_windows_input_prefills_the_editable_line(monkeypatch, capsys):
+    import msvcrt
+
+    characters = iter([" ", "i", "s", "\r"])
+    monkeypatch.setattr(msvcrt, "getwch", lambda: next(characters))
+
+    result = cli._read_windows_prefilled_input("this")
+
+    assert result == "this is"
+    assert capsys.readouterr().out == "this is\n"
+
+
+@pytest.mark.parametrize("termination", [EOFError(), KeyboardInterrupt()])
+def test_normal_cli_termination_is_clean(monkeypatch, termination):
+    read_prefilled_input = Mock(side_effect=termination)
+    get_best_k_completions = Mock(return_value=[])
+
+    monkeypatch.setattr(
+        cli,
+        "_read_prefilled_input",
+        read_prefilled_input,
+    )
+    monkeypatch.setattr(
+        cli,
+        "get_best_k_completions",
+        get_best_k_completions,
+    )
+
+    cli.main()
+
+    get_best_k_completions.assert_not_called()
+
+
 def test_cli_does_not_call_lower_level_dependencies(monkeypatch):
-    fake_input = Mock(
+    read_prefilled_input = Mock(
         side_effect=[
             "prefix",
             EOFError(),
@@ -158,7 +253,11 @@ def test_cli_does_not_call_lower_level_dependencies(monkeypatch):
     get_candidates = Mock()
     calculate_best_match = Mock()
 
-    monkeypatch.setattr("builtins.input", fake_input)
+    monkeypatch.setattr(
+        cli,
+        "_read_prefilled_input",
+        read_prefilled_input,
+    )
     monkeypatch.setattr(
         cli,
         "get_best_k_completions",
@@ -189,8 +288,7 @@ def test_cli_does_not_call_lower_level_dependencies(monkeypatch):
         raising=False,
     )
 
-    with pytest.raises(EOFError):
-        cli.main()
+    cli.main()
 
     get_best_k_completions.assert_called_once_with("prefix")
     normalize_text.assert_not_called()
