@@ -1,8 +1,14 @@
 """Command-line interface for Spec 3 autocomplete."""
 
+import json
 import sys
+import time
 
 from autocomplete import get_best_k_completions
+from src.logging_config import get_application_logger
+
+
+LOGGER = get_application_logger()
 
 
 def _read_windows_prefilled_input(initial_text: str) -> str:
@@ -111,20 +117,61 @@ def main() -> None:
     while True:
         try:
             user_input = _read_prefilled_input(current_input)
-        except (EOFError, KeyboardInterrupt):
+        except EOFError:
+            LOGGER.info("Application closed by the user.")
+            return
+        except KeyboardInterrupt:
+            LOGGER.info("Application interrupted by the user.")
             return
 
         if "#" in user_input:
             current_input = ""
+            LOGGER.info(
+                "The user finished the current query and started a new one."
+            )
             continue
 
         current_input = user_input
+        logged_query = json.dumps(current_input, ensure_ascii=False)
+        LOGGER.info("User submitted a search query: %s", logged_query)
+        search_started = time.perf_counter()
 
-        results = get_best_k_completions(current_input)
+        try:
+            results = get_best_k_completions(current_input)
+        except Exception as error:
+            elapsed_seconds = time.perf_counter() - search_started
+            LOGGER.exception(
+                "An error occurred while searching for %s after "
+                "%.3f seconds: %s",
+                logged_query,
+                elapsed_seconds,
+                error,
+            )
+            raise
+
+        elapsed_seconds = time.perf_counter() - search_started
 
         if not results:
+            LOGGER.info(
+                "Search completed successfully in %.3f seconds. "
+                "No suggestions were found for the current query.",
+                elapsed_seconds,
+            )
             print("No suggestions found.")
         else:
+            suggestion_count = len(results)
+            suggestion_word = (
+                "suggestion" if suggestion_count == 1 else "suggestions"
+            )
+            return_verb = "was" if suggestion_count == 1 else "were"
+            LOGGER.info(
+                "Search completed successfully in %.3f seconds. "
+                "%d %s %s returned.",
+                elapsed_seconds,
+                suggestion_count,
+                suggestion_word,
+                return_verb,
+            )
             print(f"Here are {len(results)} suggestions:")
 
             for position, result in enumerate(results, start=1):
