@@ -18,6 +18,9 @@ def get_best_k_completions(prefix: str) -> list[AutoCompleteData]:
         raise RuntimeError("Corpus index has not been configured")
 
     query = normalize_text(prefix)
+    if query == "":
+        return []
+
     candidates = _corpus_index.get_candidates(query)
     results = []
 

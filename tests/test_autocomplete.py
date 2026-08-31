@@ -62,6 +62,26 @@ def test_raises_when_corpus_index_is_not_configured(monkeypatch):
         autocomplete.get_best_k_completions("original prefix")
 
 
+def test_returns_empty_without_retrieving_candidates_for_empty_query(
+    fake_dependencies,
+):
+    normalize_text, calculate_best_match, auto_complete_data = (
+        fake_dependencies
+    )
+    normalize_text.return_value = ""
+
+    index = Mock()
+    autocomplete.set_corpus_index(index)
+
+    results = autocomplete.get_best_k_completions("original prefix")
+
+    assert results == []
+    normalize_text.assert_called_once_with("original prefix")
+    index.get_candidates.assert_not_called()
+    calculate_best_match.assert_not_called()
+    auto_complete_data.assert_not_called()
+
+
 def test_processes_every_candidate_and_keeps_zero_and_negative_scores(
     fake_dependencies,
 ):
