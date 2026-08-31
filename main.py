@@ -12,6 +12,9 @@ from src.logging_config import (
     get_application_logger,
     shutdown_logging,
 )
+from src.semantic.embedding_provider import embed_text
+from src.semantic.index_builder import open_or_build_store
+from src.semantic.search import semantic_search_store
 
 
 LOGGER = get_application_logger()
@@ -21,6 +24,7 @@ def main() -> None:
     """Initialize the corpus once and start the interactive CLI."""
     configure_logging()
     LOGGER.info("Application started.")
+    semantic_store = None
 
     try:
         parser = argparse.ArgumentParser(
@@ -59,9 +63,26 @@ def main() -> None:
 
         set_corpus_index(index)
         LOGGER.info("The autocomplete system is ready for searches.")
-        run_cli()
+
+        try:
+            semantic_store = open_or_build_store(index.records)
+        except Exception:
+            LOGGER.error("Semantic search initialization failed.")
+
+        if semantic_store is None:
+            run_cli()
+        else:
+            run_cli(
+                semantic_search_fn=semantic_search_store,
+                embedded_sentences=semantic_store,
+                embedder=embed_text,
+            )
     finally:
-        shutdown_logging()
+        try:
+            if semantic_store is not None:
+                semantic_store.close()
+        finally:
+            shutdown_logging()
 
 
 if __name__ == "__main__":

@@ -2,11 +2,12 @@
 
 from unittest.mock import Mock
 
+import numpy as np
 import pytest
 
 import src.semantic.search as search_module
 from src.semantic.contracts import EmbeddedSentence, SemanticResult
-from src.semantic.search import semantic_search
+from src.semantic.search import semantic_search, semantic_search_store
 
 
 def embedded_sentence(
@@ -239,6 +240,32 @@ def test_generator_input_is_scanned_once_and_returns_top_k():
     ]
 
 
+class FakeEmbeddingStore:
+    """Small block source with observable metadata access."""
+
+    def __init__(self, blocks, metadata):
+        self._blocks = blocks
+        self._metadata = metadata
+        self.count = sum(len(block) for _, block in blocks)
+        self.dim = blocks[0][1].shape[1] if blocks else 0
+        self.iter_blocks_calls = 0
+        self.metadata_calls = []
+
+    def __len__(self):
+        return self.count
+
+    def iter_blocks(self):
+        self.iter_blocks_calls += 1
+        yield from self._blocks
+
+    def metadata(self, index):
+        self.metadata_calls.append(index)
+        return self._metadata[index]
+
+    def __iter__(self):
+        raise AssertionError("store-aware search must use iter_blocks()")
+
+
 def test_only_final_top_k_semantic_results_are_materialized(monkeypatch):
     real_semantic_result = SemanticResult
     semantic_result_constructor = Mock(side_effect=real_semantic_result)
@@ -270,3 +297,99 @@ def test_only_final_top_k_semantic_results_are_materialized(monkeypatch):
         "Sentence 003",
         "Sentence 004",
     ]
+
+
+def test_store_search_uses_chunks_and_embeds_query_once():
+    store = FakeEmbeddingStore(
+        blocks=[
+            (0, np.array([[0.0, 1.0], [1.0, 0.0]], dtype=np.float32)),
+            (2, np.array([[1.0, 1.0], [-1.0, 0.0]], dtype=np.float32)),
+        ],
+        metadata={
+            0: {"sentence": "Unrelated", "source_text": "a.txt", "offset": 1},
+            1: {"sentence": "Best", "source_text": "b.txt", "offset": 2},
+            2: {"sentence": "Second", "source_text": "c.txt", "offset": 3},
+            3: {"sentence": "Opposite", "source_text": "d.txt", "offset": 4},
+        },
+    )
+    embedder = Mock(return_value=[1.0, 0.0])
+
+    results = semantic_search_store("query", store, embedder, k=2)
+
+    embedder.assert_called_once_with("query")
+    assert store.iter_blocks_calls == 1
+    assert [result.sentence for result in results] == ["Best", "Second"]
+    assert sorted(store.metadata_calls) == [1, 2]
+
+
+def test_store_search_orders_equal_similarities_alphabetically():
+    store = FakeEmbeddingStore(
+        blocks=[
+            (
+                0,
+                np.array(
+                    [[1.0, 0.0], [1.0, 0.0], [1.0, 0.0]],
+                    dtype=np.float32,
+                ),
+            )
+        ],
+        metadata={
+            0: {"sentence": "Zulu", "source_text": "z.txt", "offset": 1},
+            1: {"sentence": "Alpha", "source_text": "a.txt", "offset": 2},
+            2: {"sentence": "Beta", "source_text": "b.txt", "offset": 3},
+        },
+    )
+
+    results = semantic_search_store(
+        "query",
+        store,
+        lambda _: [1.0, 0.0],
+    )
+
+    assert [result.sentence for result in results] == [
+        "Alpha",
+        "Beta",
+        "Zulu",
+    ]
+
+
+def test_store_search_materializes_metadata_and_results_only_for_top_k(
+    monkeypatch,
+):
+    vectors = np.array(
+        [[1.0, float(index)] for index in range(20)],
+        dtype=np.float32,
+    )
+    store = FakeEmbeddingStore(
+        blocks=[(0, vectors[:7]), (7, vectors[7:14]), (14, vectors[14:])],
+        metadata={
+            index: {
+                "sentence": f"Sentence {index:02d}",
+                "source_text": "source.txt",
+                "offset": index,
+            }
+            for index in range(20)
+        },
+    )
+    real_semantic_result = SemanticResult
+    semantic_result_constructor = Mock(side_effect=real_semantic_result)
+    monkeypatch.setattr(
+        search_module,
+        "SemanticResult",
+        semantic_result_constructor,
+    )
+
+    results = semantic_search_store(
+        "query",
+        store,
+        lambda _: [1.0, 0.0],
+        k=3,
+    )
+
+    assert [result.sentence for result in results] == [
+        "Sentence 00",
+        "Sentence 01",
+        "Sentence 02",
+    ]
+    assert sorted(store.metadata_calls) == [0, 1, 2]
+    assert semantic_result_constructor.call_count == 3

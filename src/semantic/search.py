@@ -5,6 +5,8 @@ import itertools
 from collections.abc import Iterable
 from dataclasses import dataclass
 
+import numpy as np
+
 from src.semantic.contracts import EmbeddedSentence, SemanticResult
 from src.semantic.similarity import cosine_similarity
 
@@ -89,3 +91,95 @@ def semantic_search(
         )
         for candidate in top_candidates
     ]
+
+
+def _query_vector(query: str, embedder) -> np.ndarray:
+    """Embed and validate one query as a float32 NumPy vector."""
+    embedding = embedder(query)
+
+    try:
+        with np.errstate(over="ignore", invalid="ignore"):
+            vector = np.asarray(embedding, dtype=np.float32)
+    except (TypeError, ValueError) as error:
+        raise ValueError(
+            "query embedding must contain only numeric values"
+        ) from error
+
+    if vector.ndim != 1 or vector.size == 0:
+        raise ValueError("query embedding must be a non-empty vector")
+
+    if not np.all(np.isfinite(vector)):
+        raise ValueError("query embedding must contain only finite values")
+
+    magnitude = float(np.linalg.norm(vector))
+    if not np.isfinite(magnitude) or magnitude == 0.0:
+        raise ValueError("query embedding must have non-zero magnitude")
+
+    return vector
+
+
+def semantic_search_store(
+    query: str,
+    store,
+    embedder,
+    k: int = 5,
+) -> list[SemanticResult]:
+    """Search a memory-mapped embedding store in vectorized chunks."""
+    if k <= 0 or not query.strip() or len(store) == 0:
+        return []
+
+    query_vector = _query_vector(query, embedder)
+    if query_vector.size != store.dim:
+        raise ValueError(
+            "query embedding dimensions do not match the embedding store"
+        )
+
+    query_magnitude = float(np.linalg.norm(query_vector))
+    top_candidates: list[tuple[float, int]] = []
+
+    for start_index, block in store.iter_blocks():
+        vectors = np.asarray(block, dtype=np.float32)
+        if vectors.ndim != 2 or vectors.shape[1] != query_vector.size:
+            raise ValueError("embedding store yielded an invalid block")
+
+        with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+            magnitudes = np.linalg.norm(vectors, axis=1)
+            similarities = (
+                vectors @ query_vector
+            ) / (magnitudes * query_magnitude)
+
+        valid_positions = np.flatnonzero(
+            np.isfinite(similarities) & (magnitudes > 0.0)
+        )
+
+        for relative_index in valid_positions:
+            absolute_index = start_index + int(relative_index)
+            candidate = (
+                float(similarities[relative_index]),
+                -absolute_index,
+            )
+
+            if len(top_candidates) < k:
+                heapq.heappush(top_candidates, candidate)
+            elif candidate > top_candidates[0]:
+                heapq.heapreplace(top_candidates, candidate)
+
+    results = []
+    for similarity, negative_index in top_candidates:
+        metadata = store.metadata(-negative_index)
+        results.append(
+            SemanticResult(
+                sentence=metadata["sentence"],
+                source_text=metadata["source_text"],
+                offset=metadata["offset"],
+                similarity=similarity,
+            )
+        )
+
+    results.sort(
+        key=lambda result: (
+            -result.similarity,
+            result.sentence,
+        )
+    )
+    return results
