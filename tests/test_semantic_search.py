@@ -4,6 +4,7 @@ from unittest.mock import Mock
 
 import pytest
 
+import src.semantic.search as search_module
 from src.semantic.contracts import EmbeddedSentence, SemanticResult
 from src.semantic.search import semantic_search
 
@@ -125,6 +126,13 @@ def test_empty_corpus_returns_empty_without_embedding_query():
     embedder.assert_not_called()
 
 
+def test_empty_generator_returns_empty_without_embedding_query():
+    embedder = Mock()
+
+    assert semantic_search("query", iter(()), embedder) == []
+    embedder.assert_not_called()
+
+
 @pytest.mark.parametrize("query", ["", " ", "\t\n"])
 def test_empty_or_whitespace_query_returns_empty_without_embedding(query):
     embedder = Mock()
@@ -200,3 +208,65 @@ def test_embedder_exception_propagates():
 
     with pytest.raises(RuntimeError, match="embedding service unavailable"):
         semantic_search("query", corpus, failing_embedder)
+
+
+def test_generator_input_is_scanned_once_and_returns_top_k():
+    generated_sentences = []
+
+    def sentence_source():
+        for index in range(10):
+            sentence = f"Sentence {index:02d}"
+            generated_sentences.append(sentence)
+            yield embedded_sentence(
+                sentence,
+                [1.0, float(index)],
+            )
+
+    results = semantic_search(
+        "query",
+        sentence_source(),
+        lambda _: [1.0, 0.0],
+        k=3,
+    )
+
+    assert generated_sentences == [
+        f"Sentence {index:02d}" for index in range(10)
+    ]
+    assert [result.sentence for result in results] == [
+        "Sentence 00",
+        "Sentence 01",
+        "Sentence 02",
+    ]
+
+
+def test_only_final_top_k_semantic_results_are_materialized(monkeypatch):
+    real_semantic_result = SemanticResult
+    semantic_result_constructor = Mock(side_effect=real_semantic_result)
+    monkeypatch.setattr(
+        search_module,
+        "SemanticResult",
+        semantic_result_constructor,
+    )
+    corpus = (
+        embedded_sentence(
+            f"Sentence {index:03d}",
+            [1.0, 0.0],
+        )
+        for index in range(100)
+    )
+
+    results = semantic_search(
+        "query",
+        corpus,
+        lambda _: [1.0, 0.0],
+        k=5,
+    )
+
+    assert semantic_result_constructor.call_count == 5
+    assert [result.sentence for result in results] == [
+        "Sentence 000",
+        "Sentence 001",
+        "Sentence 002",
+        "Sentence 003",
+        "Sentence 004",
+    ]
