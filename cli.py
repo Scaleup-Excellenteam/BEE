@@ -10,6 +10,15 @@ from src.logging_config import get_application_logger
 
 LOGGER = get_application_logger()
 
+# Typed inside a mode to return to the main menu.  It is navigation only:
+# it is never passed to autocomplete or to semantic search.
+BACK_COMMAND = "back"
+
+
+def _is_back_command(user_input: str) -> bool:
+    """Return whether the user asked to return to the main menu."""
+    return user_input.strip().lower() == BACK_COMMAND
+
 
 def _print_mode_menu() -> None:
     """Display the application's top-level mode choices."""
@@ -25,26 +34,74 @@ def _print_mode_menu() -> None:
     print()
 
 
+def _run_regular_mode() -> bool:
+    """Run Part A autocomplete until the user leaves the mode.
+
+    Returns ``True`` when the user asked to go back to the main menu, and
+    ``False`` when the input stream ended and the application should stop.
+    """
+    print("Regular Autocomplete")
+    print(f"Type '{BACK_COMMAND}' to return to the main menu.")
+    print()
+
+    return main()
+
+
 def _run_semantic_mode(
     semantic_search_fn,
     embedded_sentences,
     embedder,
-) -> None:
-    """Run one semantic query using dependencies supplied at startup."""
+) -> bool:
+    """Answer semantic queries until the user leaves the mode.
+
+    Returns ``True`` when the user asked to go back to the main menu, and
+    ``False`` when the input stream ended and the application should stop.
+    """
     print("Semantic Search")
-    print()
 
     if (
         semantic_search_fn is None
         or embedded_sentences is None
         or embedder is None
     ):
+        print()
         print("Semantic Search is temporarily unavailable.")
-        return
+        return True
 
-    print("Enter your query:")
-    query = input()
+    print(f"Type '{BACK_COMMAND}' to return to the main menu.")
+    print()
 
+    while True:
+        print("Enter your query:")
+
+        try:
+            query = input()
+        except EOFError:
+            LOGGER.info("Application closed by the user.")
+            return False
+        except KeyboardInterrupt:
+            LOGGER.info("Application interrupted by the user.")
+            return False
+
+        if _is_back_command(query):
+            LOGGER.info("The user returned to the main menu.")
+            return True
+
+        _print_semantic_results(
+            query,
+            semantic_search_fn,
+            embedded_sentences,
+            embedder,
+        )
+
+
+def _print_semantic_results(
+    query,
+    semantic_search_fn,
+    embedded_sentences,
+    embedder,
+) -> None:
+    """Run one semantic query and print whatever it returns."""
     try:
         results = semantic_search_fn(
             query,
@@ -83,15 +140,19 @@ def run_mode_menu(
             choice = input("> ").strip()
 
             if choice == "1":
-                main()
-                return
+                if not _run_regular_mode():
+                    return
+
+                continue
 
             if choice == "2":
-                _run_semantic_mode(
+                if not _run_semantic_mode(
                     semantic_search_fn,
                     embedded_sentences,
                     embedder,
-                )
+                ):
+                    return
+
                 continue
 
             if choice == "3":
@@ -203,8 +264,12 @@ def _read_prefilled_input(initial_text: str) -> str:
         readline.set_startup_hook()
 
 
-def main() -> None:
-    """Run the interactive autocomplete command-line interface."""
+def main() -> bool:
+    """Run the interactive autocomplete command-line interface.
+
+    Returns ``True`` when the user asked to go back to the main menu, and
+    ``False`` when the input stream ended and the application should stop.
+    """
     current_input = ""
 
     print("The system is ready. Enter your text:")
@@ -214,10 +279,17 @@ def main() -> None:
             user_input = _read_prefilled_input(current_input)
         except EOFError:
             LOGGER.info("Application closed by the user.")
-            return
+            return False
         except KeyboardInterrupt:
             LOGGER.info("Application interrupted by the user.")
-            return
+            return False
+
+        # Navigation is checked first so that "back" never reaches the
+        # autocomplete engine.  It cannot contain "#", so the reset rule
+        # below is unaffected.
+        if _is_back_command(user_input):
+            LOGGER.info("The user returned to the main menu.")
+            return True
 
         if "#" in user_input:
             current_input = ""
