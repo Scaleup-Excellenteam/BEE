@@ -33,6 +33,12 @@ def initialize_log_search() -> LogSearchService:
     service = LogSearchService()
     added = service.refresh()
 
+    # Load the model here rather than on the first query.  A cold cache
+    # has already loaded it during refresh, so this costs nothing then;
+    # a warm cache embeds nothing, and without this the first mode 2
+    # entry would pay several seconds of model loading on its own.
+    service.warm_up()
+
     elapsed_seconds = time.perf_counter() - preparation_started
     indexed = len(service)
 
@@ -120,7 +126,7 @@ def main() -> None:
                 # the CLI: a typed query is a demo search, never a real
                 # fault, so it must not be appended to the log.
                 run_cli(
-                    log_search_fn=log_search.search_similar_logs,
+                    record_fault_fn=log_search.record_error,
                     log_size_fn=lambda: len(log_search),
                 )
             finally:

@@ -47,20 +47,24 @@ def _run_regular_mode() -> bool:
     return main()
 
 
-def _run_log_search_mode(log_search_fn, log_size_fn=None) -> bool:
-    """Answer semantic log queries until the user leaves the mode.
+def _run_log_search_mode(record_fault_fn, log_size_fn=None) -> bool:
+    """Record incoming faults until the user leaves the mode.
+
+    Every message entered here is treated as a REAL satellite fault: it
+    is matched against the incident history first, then recorded.
 
     Returns ``True`` when the user asked to go back to the main menu, and
     ``False`` when the input stream ended and the application should stop.
     """
     print("Semantic Log Search")
 
-    if log_search_fn is None:
+    if record_fault_fn is None:
         print()
         print("Semantic Log Search is temporarily unavailable.")
         return True
 
     print(f"Type '{BACK_COMMAND}' to return to the main menu.")
+    print("Each message entered is recorded as a new satellite fault.")
     print()
 
     while True:
@@ -75,15 +79,21 @@ def _run_log_search_mode(log_search_fn, log_size_fn=None) -> bool:
             LOGGER.info("Application interrupted by the user.")
             return False
 
+        # Navigation is not a fault, and neither is an empty line.
         if _is_back_command(query):
             LOGGER.info("The user returned to the main menu.")
             return True
 
-        _print_log_search_results(query, log_search_fn, log_size_fn)
+        if not query.strip():
+            print("Please enter a fault message.")
+            print()
+            continue
+
+        _record_and_report_fault(query, record_fault_fn, log_size_fn)
 
 
 def _format_log_message(message: str) -> list[str]:
-    """Return the display lines for one stored log message.
+    """Return the display lines for one stored fault message.
 
     A logged exception carries its traceback, which would fill the screen
     five times over.  Only the first line is shown, with a note saying
@@ -95,6 +105,39 @@ def _format_log_message(message: str) -> list[str]:
         return lines
 
     return [lines[0], f"   ({len(lines) - 1} more line(s) in this entry)"]
+
+
+def _print_incident(position, match) -> None:
+    """Print one matched incident and the metadata worth knowing."""
+    message, *extra = _format_log_message(match.message)
+    print(f"{position}. {message}")
+
+    for line in extra:
+        print(line)
+
+    print(f"   Similarity: {match.similarity:.2f}")
+    print(f"   Subsystem: {match.subsystem}")
+    print(f"   Severity: {match.severity}")
+    print(f"   Occurrences: {match.count}")
+
+    if match.error_code:
+        print(f"   Error code: {match.error_code}")
+
+    if match.first_seen:
+        print(f"   First seen: {match.first_seen}")
+
+    if match.last_seen:
+        print(f"   Last seen: {match.last_seen}")
+
+    # Only shown when someone actually recorded them, so a bare incident
+    # does not print two empty labels.
+    if match.previous_action:
+        print(f"   Previous action: {match.previous_action}")
+
+    if match.outcome:
+        print(f"   Outcome: {match.outcome}")
+
+    print()
 
 
 def _print_query_metrics(elapsed_ms, searched, returned) -> None:
@@ -109,29 +152,33 @@ def _print_query_metrics(elapsed_ms, searched, returned) -> None:
     print()
 
 
-def _print_log_search_results(query, log_search_fn, log_size_fn=None) -> None:
-    """Run one log search, print its results, then print its cost.
+def _record_and_report_fault(message, record_fault_fn, log_size_fn=None) -> None:
+    """Record one incoming fault and print the incidents it resembles.
 
-    The timer spans the whole call, so it covers embedding the query as
-    well as scanning the cache: that total is what a user actually waits
-    for.
+    The history size is read BEFORE recording, so the reported figure is
+    the history the fault was actually compared against rather than the
+    history it then became part of.
+
+    The timer spans the whole call, so it covers embedding the message,
+    scanning the cache and storing the fault: that total is what a user
+    actually waits for.
     """
+    searched = log_size_fn() if log_size_fn is not None else None
     started = time.perf_counter()
 
     try:
-        results = log_search_fn(query)
+        results = record_fault_fn(message)
     except Exception:
         LOGGER.error("Semantic log search failed.")
         print("Semantic Log Search is temporarily unavailable.")
         return
 
     elapsed_ms = (time.perf_counter() - started) * 1000
-    searched = log_size_fn() if log_size_fn is not None else None
 
     LOGGER.info(
-        "Semantic log query %s completed in %.1f ms over %s historical "
+        "Satellite fault %s matched in %.1f ms against %s historical "
         "fault records, returning %d results.",
-        json.dumps(query, ensure_ascii=False),
+        json.dumps(message, ensure_ascii=False),
         elapsed_ms,
         "an unknown number of" if searched is None else searched,
         len(results),
@@ -144,30 +191,23 @@ def _print_log_search_results(query, log_search_fn, log_size_fn=None) -> None:
         print(f"Top {len(results)} similar historical faults:")
         print()
 
-        for position, result in enumerate(results, start=1):
-            message, *extra = _format_log_message(result.sentence)
-            print(f"{position}. {message}")
-
-            for line in extra:
-                print(line)
-
-            print(f"   Source: {result.source_text}:{result.offset}")
-            print(f"   Similarity: {result.similarity:.2f}")
-            print()
+        for position, match in enumerate(results, start=1):
+            _print_incident(position, match)
 
     _print_query_metrics(elapsed_ms, searched, len(results))
 
 
-def run_mode_menu(*, log_search_fn=None, log_size_fn=None) -> None:
-    """Run the mode menu with an optional injected log search.
+def run_mode_menu(*, record_fault_fn=None, log_size_fn=None) -> None:
+    """Run the mode menu with an optional injected fault recorder.
 
-    ``log_search_fn`` is called as ``log_search_fn(query)`` and returns
-    ``SemanticResult`` objects.  It is a READ ONLY search: typing a query
-    here is a demo lookup and must never append a fault to the log.
+    ``record_fault_fn`` is called as ``record_fault_fn(message)``.  It
+    searches the incident history, returns the matching incidents, and
+    only THEN records the message, so a fault can never be returned as a
+    match for itself.
 
     ``log_size_fn`` is called with no arguments and returns how many
-    historical faults are indexed.  It is used only to report how much
-    was searched, and the mode works without it.
+    incidents are recorded.  It is used only to report how much was
+    searched, and the mode works without it.
     """
     while True:
         try:
@@ -181,7 +221,7 @@ def run_mode_menu(*, log_search_fn=None, log_size_fn=None) -> None:
                 continue
 
             if choice == "2":
-                if not _run_log_search_mode(log_search_fn, log_size_fn):
+                if not _run_log_search_mode(record_fault_fn, log_size_fn):
                     return
 
                 continue

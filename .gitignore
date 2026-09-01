@@ -8,3 +8,5 @@ logs/
 embedding_cache/
 embedding_cache_test/
 log_embedding_cache/
+logs/satellite_incidents.jsonl
+satellite_fault_cache/

@@ -1,0 +1,15 @@
+2024-03-11 04:12:07 | ERROR | Battery voltage dropped below safe level
+2024-03-11 06:48:52 | CRITICAL | Communication link lost
+2024-03-12 22:05:19 | WARNING | Reaction wheel temperature too high
+2024-04-02 09:31:44 | ERROR | Solar array failed to deploy on schedule
+2024-04-17 13:57:03 | WARNING | Star tracker lost attitude lock during eclipse
+2024-05-08 01:22:38 | ERROR | Telemetry packet checksum mismatch on downlink
+2024-05-21 18:40:11 | CRITICAL | Attitude control lost during slew manoeuvre
+2024-06-14 07:03:26 | ERROR | Uplink receiver failed to acquire carrier
+2024-06-30 15:19:50 | WARNING | Thermal loop coolant pressure below nominal
+2024-07-19 20:44:33 | ERROR | Onboard computer performed an unexpected reset
+2024-08-05 11:26:58 | WARNING | Gyroscope drift exceeded calibration limits
+2024-08-23 03:09:14 | CRITICAL | Propulsion valve failed to close after burn
+2024-09-09 16:52:41 | ERROR | Payload instrument returned corrupted science data
+2024-09-27 08:15:29 | WARNING | Solar array output degraded beyond prediction
+2024-10-16 23:38:07 | ERROR | Ground station handover timed out mid-pass
