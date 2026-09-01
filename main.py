@@ -40,7 +40,7 @@ def initialize_log_search() -> LogSearchService:
     # Load the model here rather than on the first query.  A cold cache
     # has already loaded it during refresh, so this costs nothing then;
     # a warm cache embeds nothing, and without this the first mode 2
-    # query would pay several seconds of model loading on its own.
+    # entry would pay several seconds of model loading on its own.
     service.warm_up()
 
     elapsed_seconds = time.perf_counter() - preparation_started
@@ -133,6 +133,7 @@ def main() -> None:
                 run_cli(
                     record_fault_fn=log_search.record_error,
                     log_size_fn=lambda: len(log_search),
+                    storage_status_fn=log_search.storage_status,
                 )
             finally:
                 log_search.close()

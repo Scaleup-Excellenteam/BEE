@@ -167,9 +167,7 @@ def test_the_local_copy_is_preferred_over_the_hub(monkeypatch):
 
 
 def test_a_machine_without_the_model_falls_back_to_downloading(monkeypatch):
-    created = Mock(
-        side_effect=[OSError("not in cache"), stub_model([[1.0]])]
-    )
+    created = Mock(side_effect=[OSError("not in cache"), stub_model([[1.0]])])
     monkeypatch.setitem(
         sys.modules,
         "sentence_transformers",
@@ -184,9 +182,7 @@ def test_a_machine_without_the_model_falls_back_to_downloading(monkeypatch):
 
 
 def test_no_token_is_ever_passed_to_the_model(monkeypatch):
-    created = Mock(
-        side_effect=[OSError("not in cache"), stub_model([[1.0]])]
-    )
+    created = Mock(side_effect=[OSError("not in cache"), stub_model([[1.0]])])
     monkeypatch.setitem(
         sys.modules,
         "sentence_transformers",

@@ -68,7 +68,7 @@ def ready_service(indexed=4, newly_embedded=4):
 
 
 def test_the_recording_entry_point_is_handed_to_the_cli(startup):
-    """Mode 2 learns, so the CLI drives record_error, not the read-only search."""
+    """Mode 2 learns, so the CLI drives record_error."""
     service = ready_service(indexed=7)
 
     run_cli, _ = startup(Mock(return_value=service))
@@ -86,6 +86,26 @@ def test_nothing_is_recorded_during_startup(startup):
     startup(Mock(return_value=service))
 
     service.record_error.assert_not_called()
+
+
+def test_the_model_is_warmed_during_startup(startup):
+    service = ready_service()
+
+    startup(Mock(return_value=service))
+
+    service.warm_up.assert_called_once_with()
+
+
+def test_warm_up_happens_after_the_history_is_prepared(startup):
+    """Refreshing first means a cold cache does not load the model twice."""
+    service = ready_service()
+    order = []
+    service.refresh.side_effect = lambda: order.append("refresh") or 4
+    service.warm_up.side_effect = lambda: order.append("warm_up")
+
+    startup(Mock(return_value=service))
+
+    assert order == ["refresh", "warm_up"]
 
 
 def test_the_service_is_built_once_and_reused(startup):
@@ -277,27 +297,8 @@ def test_no_metrics_are_printed_when_setup_fails(startup, capsys):
     assert "Semantic Log Search ready:" not in capsys.readouterr().out
 
 
-def test_the_model_is_warmed_during_startup(startup):
-    service = ready_service()
-
-    startup(Mock(return_value=service))
-
-    service.warm_up.assert_called_once_with()
-
-
-def test_warm_up_happens_after_the_cache_refresh(startup):
-    """Refreshing first means a cold cache does not load the model twice."""
-    service = ready_service()
-    order = []
-    service.refresh.side_effect = lambda: order.append("refresh") or 4
-    service.warm_up.side_effect = lambda: order.append("warm_up")
-
-    startup(Mock(return_value=service))
-
-    assert order == ["refresh", "warm_up"]
-
-
 def test_a_failed_warm_up_degrades_gracefully(startup):
+    """A model that will not load must not take Regular Autocomplete down."""
     service = MagicMock()
     service.refresh.return_value = 0
     service.warm_up.side_effect = RuntimeError("model could not be loaded")

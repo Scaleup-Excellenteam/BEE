@@ -31,6 +31,7 @@ from src.logging_config import get_application_logger
 
 LOGGER = get_application_logger()
 
+
 # A small, fast, widely used sentence embedding model.
 MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 
@@ -114,7 +115,7 @@ def warm_up() -> None:
     The model is loaded lazily, which would otherwise put several
     seconds onto whichever query happens to come first.  Calling this
     during startup moves that cost to where the user expects it.  It
-    embeds one throwaway token and no corpus text, so nothing in the
+    embeds one throwaway token and no incident text, so nothing in the
     cache is embedded twice.
     """
     _encode([WARM_UP_TEXT])
