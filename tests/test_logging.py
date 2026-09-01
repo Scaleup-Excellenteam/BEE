@@ -71,6 +71,14 @@ def test_main_logs_application_and_corpus_lifecycle(
         set_corpus_index,
     )
     monkeypatch.setattr(application_main, "run_cli", run_cli)
+    # Semantic Log Search is exercised in tests/test_main_log_search.py.
+    # Stubbing it here keeps this logging test from loading the local
+    # model and building a real cache.
+    monkeypatch.setattr(
+        application_main,
+        "initialize_log_search",
+        Mock(return_value=None),
+    )
     monkeypatch.setattr(
         application_main.time,
         "perf_counter",

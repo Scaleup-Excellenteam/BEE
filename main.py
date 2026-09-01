@@ -12,51 +12,47 @@ from src.logging_config import (
     get_application_logger,
     shutdown_logging,
 )
-from src.semantic.embedding_provider import embed_text, embed_texts
-from src.semantic.index_builder import open_or_build_store
-from src.semantic.search import semantic_search
+from src.logsearch.log_index import LogSearchService
 
 
 LOGGER = get_application_logger()
 
-# Semantic Search is still a smoke test, so it is built from a small
-# sample of the corpus only.  Embedding all 2.58 million sentences would
-# cost roughly 26,000 Gemini requests and about 8 GB of cache, which is
-# not something application startup should do.
-SEMANTIC_SAMPLE_SIZE = 100
 
-# Deliberately NOT the production "embedding_cache" directory, so this
-# sample can never be mistaken for a real full corpus build.
-SEMANTIC_CACHE_PATH = "embedding_cache_test"
+def initialize_log_search() -> LogSearchService:
+    """Return a ready semantic log search service.
 
-
-def initialize_semantic_store(index):
-    """Return an embedding store built from a sample of the corpus.
-
-    The sample is spread evenly across the whole corpus rather than taken
-    from the front, so it covers every source file instead of only the
-    first one.
+    The service embeds its history locally, so this needs no API key and
+    makes no network call.  On a first run it builds
+    ``log_embedding_cache`` from the ERROR, WARNING and CRITICAL entries
+    already in the log; afterwards it embeds only the entries appended
+    since, which normally means none at all.
     """
-    step = max(1, len(index.records) // SEMANTIC_SAMPLE_SIZE)
-    records = index.records[::step][:SEMANTIC_SAMPLE_SIZE]
+    LOGGER.info("Semantic log search preparation started.")
+    preparation_started = time.perf_counter()
+
+    service = LogSearchService()
+    added = service.refresh()
+
+    elapsed_seconds = time.perf_counter() - preparation_started
+    indexed = len(service)
 
     LOGGER.info(
-        "Semantic preparation started using %d corpus sentences.",
-        len(records),
+        "Semantic log search is ready with %d indexed fault records "
+        "(%d newly embedded) in %.3f seconds.",
+        indexed,
+        added,
+        elapsed_seconds,
     )
 
-    store = open_or_build_store(
-        records,
-        cache_path=SEMANTIC_CACHE_PATH,
-        batch_embedder=embed_texts,
-    )
+    # A warm cache shows a near zero time here and "Newly embedded: 0",
+    # which is the whole argument for keeping the cache on disk.
+    print("Semantic Log Search ready:")
+    print(f"  Historical faults: {indexed}")
+    print(f"  Newly embedded: {added}")
+    print(f"  Initialization time: {elapsed_seconds:.3f} sec")
+    print()
 
-    LOGGER.info(
-        "Semantic preparation completed successfully with %d sentences.",
-        len(store),
-    )
-
-    return store
+    return service
 
 
 def main() -> None:
@@ -103,29 +99,32 @@ def main() -> None:
         LOGGER.info("The autocomplete system is ready for searches.")
 
         # Regular Autocomplete is already usable at this point.  Semantic
-        # Search is optional extra credit: if Gemini or the cache is not
-        # available, the failure is logged and mode 1 carries on working.
+        # Log Search is optional: if the local model or its cache cannot
+        # be prepared, the failure is logged and mode 1 carries on.
         try:
-            semantic_store = initialize_semantic_store(index)
+            log_search = initialize_log_search()
         except Exception as error:
             LOGGER.exception(
-                "Semantic Search is unavailable because its preparation "
-                "failed: %s",
+                "Semantic Log Search is unavailable because its "
+                "preparation failed: %s",
                 error,
             )
-            semantic_store = None
+            log_search = None
 
-        if semantic_store is None:
+        if log_search is None:
             run_cli()
         else:
             try:
+                # The service is built once here and reused for every
+                # mode 2 query.  Only its read-only search is exposed to
+                # the CLI: a typed query is a demo search, never a real
+                # fault, so it must not be appended to the log.
                 run_cli(
-                    semantic_search_fn=semantic_search,
-                    embedded_sentences=semantic_store,
-                    embedder=embed_text,
+                    log_search_fn=log_search.search_similar_logs,
+                    log_size_fn=lambda: len(log_search),
                 )
             finally:
-                semantic_store.close()
+                log_search.close()
     finally:
         shutdown_logging()
 

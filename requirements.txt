@@ -3,3 +3,7 @@
 # standard library alone.
 google-genai>=2.10.0
 numpy>=2.0
+
+# Local (offline) embeddings for semantic log search.
+# No API key required; used instead of Gemini on that path.
+sentence-transformers>=5.0

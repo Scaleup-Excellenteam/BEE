@@ -7,3 +7,4 @@ logs/
 .env.*
 embedding_cache/
 embedding_cache_test/
+log_embedding_cache/

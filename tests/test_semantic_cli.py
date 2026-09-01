@@ -1,5 +1,6 @@
-"""Tests for the dependency-injected semantic CLI mode."""
+"""Tests for the mode menu and the semantic log search CLI mode."""
 
+import re
 from dataclasses import dataclass
 from unittest.mock import Mock, call
 
@@ -16,6 +17,20 @@ class FakeSemanticResult:
     similarity: float
 
 
+def fake_result(
+    sentence="Semantic search failed.",
+    offset=123,
+    similarity=0.9124,
+):
+    """Return one result shaped like a SemanticResult."""
+    return FakeSemanticResult(
+        sentence=sentence,
+        source_text="autocomplete.log",
+        offset=offset,
+        similarity=similarity,
+    )
+
+
 def test_menu_displays_all_modes_and_exit(monkeypatch, capsys):
     monkeypatch.setattr("builtins.input", Mock(return_value="3"))
 
@@ -24,8 +39,35 @@ def test_menu_displays_all_modes_and_exit(monkeypatch, capsys):
     output = capsys.readouterr().out
     assert "SMART AUTOCOMPLETE" in output
     assert "1. Regular Autocomplete" in output
-    assert "2. Semantic Search" in output
+    assert "2. Semantic Log Search" in output
     assert "3. Exit" in output
+
+
+def test_invalid_menu_option_allows_another_selection(monkeypatch, capsys):
+    monkeypatch.setattr(
+        "builtins.input",
+        Mock(side_effect=["invalid", "3"]),
+    )
+
+    cli.run_mode_menu()
+
+    output = capsys.readouterr().out
+    assert "Invalid option. Please choose 1, 2, or 3." in output
+    assert output.count("SMART AUTOCOMPLETE") == 2
+
+
+@pytest.mark.parametrize("termination", [EOFError(), KeyboardInterrupt()])
+def test_menu_termination_is_clean(monkeypatch, capsys, termination):
+    monkeypatch.setattr("builtins.input", Mock(side_effect=termination))
+
+    cli.run_mode_menu()
+
+    assert "Traceback" not in capsys.readouterr().out
+
+
+# ----------------------------------------------------------------------
+# Mode 1: Regular Autocomplete (Part A, unchanged)
+# ----------------------------------------------------------------------
 
 
 def test_mode_one_reuses_regular_autocomplete(monkeypatch):
@@ -71,174 +113,6 @@ def test_mode_one_preserves_hash_reset_behavior(monkeypatch):
         call("new sentence"),
     ]
     get_best_k_completions.assert_called_once_with("new sentence")
-
-
-def test_mode_two_invokes_search_and_displays_result(monkeypatch, capsys):
-    inputs = Mock(side_effect=["2", "how do I login", "back", "3"])
-    embedded_sentences = [object()]
-    embedder = Mock()
-    semantic_search = Mock(
-        return_value=[
-            FakeSemanticResult(
-                sentence=(
-                    "Authentication is required before accessing the system."
-                ),
-                source_text="sg244986.txt",
-                offset=17425,
-                similarity=0.9124,
-            )
-        ]
-    )
-
-    monkeypatch.setattr("builtins.input", inputs)
-
-    cli.run_mode_menu(
-        semantic_search_fn=semantic_search,
-        embedded_sentences=embedded_sentences,
-        embedder=embedder,
-    )
-
-    semantic_search.assert_called_once_with(
-        "how do I login",
-        embedded_sentences,
-        embedder,
-    )
-    output = capsys.readouterr().out
-    assert "Here are 1 semantic results:" in output
-    assert (
-        "1. Authentication is required before accessing the system."
-        in output
-    )
-    assert "Source: sg244986.txt:17425" in output
-    assert "Similarity: 0.912" in output
-    assert "score" not in output.lower()
-
-
-def test_empty_semantic_query_is_passed_to_search(monkeypatch, capsys):
-    semantic_search = Mock(return_value=[])
-    monkeypatch.setattr(
-        "builtins.input",
-        Mock(side_effect=["2", "   ", "back", "3"]),
-    )
-
-    cli.run_mode_menu(
-        semantic_search_fn=semantic_search,
-        embedded_sentences=[],
-        embedder=Mock(),
-    )
-
-    assert semantic_search.call_args.args[0] == "   "
-    assert "No semantic results found." in capsys.readouterr().out
-
-
-def test_semantic_no_results_message(monkeypatch, capsys):
-    semantic_search = Mock(return_value=[])
-    monkeypatch.setattr(
-        "builtins.input",
-        Mock(side_effect=["2", "unknown topic", "back", "3"]),
-    )
-
-    cli.run_mode_menu(
-        semantic_search_fn=semantic_search,
-        embedded_sentences=[object()],
-        embedder=Mock(),
-    )
-
-    assert "No semantic results found." in capsys.readouterr().out
-
-
-def test_semantic_failure_is_handled_and_menu_remains_usable(
-    monkeypatch,
-    capsys,
-):
-    semantic_search = Mock(side_effect=RuntimeError("service failed"))
-    monkeypatch.setattr(
-        "builtins.input",
-        Mock(side_effect=["2", "query", "back", "3"]),
-    )
-
-    cli.run_mode_menu(
-        semantic_search_fn=semantic_search,
-        embedded_sentences=[object()],
-        embedder=Mock(),
-    )
-
-    output = capsys.readouterr().out
-    assert "Semantic Search is temporarily unavailable." in output
-    assert "Traceback" not in output
-    assert output.count("SMART AUTOCOMPLETE") == 2
-
-
-def test_missing_semantic_dependencies_are_handled(monkeypatch, capsys):
-    monkeypatch.setattr(
-        "builtins.input",
-        Mock(side_effect=["2", "3"]),
-    )
-
-    cli.run_mode_menu()
-
-    assert (
-        "Semantic Search is temporarily unavailable."
-        in capsys.readouterr().out
-    )
-
-
-def test_invalid_menu_option_allows_another_selection(monkeypatch, capsys):
-    monkeypatch.setattr(
-        "builtins.input",
-        Mock(side_effect=["invalid", "3"]),
-    )
-
-    cli.run_mode_menu()
-
-    output = capsys.readouterr().out
-    assert "Invalid option. Please choose 1, 2, or 3." in output
-    assert output.count("SMART AUTOCOMPLETE") == 2
-
-
-def test_mode_three_exits_without_invoking_either_search(monkeypatch):
-    regular_autocomplete = Mock()
-    semantic_search = Mock()
-    monkeypatch.setattr("builtins.input", Mock(return_value="3"))
-    monkeypatch.setattr(cli, "main", regular_autocomplete)
-
-    cli.run_mode_menu(
-        semantic_search_fn=semantic_search,
-        embedded_sentences=[object()],
-        embedder=Mock(),
-    )
-
-    regular_autocomplete.assert_not_called()
-    semantic_search.assert_not_called()
-
-
-@pytest.mark.parametrize("termination", [EOFError(), KeyboardInterrupt()])
-def test_menu_termination_is_clean(monkeypatch, capsys, termination):
-    monkeypatch.setattr("builtins.input", Mock(side_effect=termination))
-
-    cli.run_mode_menu()
-
-    assert "Traceback" not in capsys.readouterr().out
-
-
-@pytest.mark.parametrize("termination", [EOFError(), KeyboardInterrupt()])
-def test_semantic_query_termination_is_clean(
-    monkeypatch,
-    capsys,
-    termination,
-):
-    monkeypatch.setattr(
-        "builtins.input",
-        Mock(side_effect=["2", termination]),
-    )
-
-    cli.run_mode_menu(
-        semantic_search_fn=Mock(),
-        embedded_sentences=[object()],
-        embedder=Mock(),
-    )
-
-    assert "Traceback" not in capsys.readouterr().out
 
 
 def test_mode_one_allows_several_searches_then_returns_to_the_menu(
@@ -363,107 +237,350 @@ def test_mode_one_can_be_re_entered_after_going_back(monkeypatch):
     ]
 
 
+# ----------------------------------------------------------------------
+# Mode 2: Semantic Log Search
+# ----------------------------------------------------------------------
+
+
+def test_mode_two_searches_the_log_and_displays_results(monkeypatch, capsys):
+    log_search = Mock(return_value=[fake_result()])
+    monkeypatch.setattr(
+        "builtins.input",
+        Mock(side_effect=["2", "communication failure", "back", "3"]),
+    )
+
+    cli.run_mode_menu(log_search_fn=log_search)
+
+    log_search.assert_called_once_with("communication failure")
+
+    output = capsys.readouterr().out
+    assert "Semantic Log Search" in output
+    assert "Type 'back' to return to the main menu." in output
+    assert "Enter an error/message:" in output
+    assert "Top 1 similar historical faults:" in output
+    assert "1. Semantic search failed." in output
+    assert "Source: autocomplete.log:123" in output
+    assert "Similarity: 0.91" in output
+    assert "score" not in output.lower()
+
+
+def test_mode_two_displays_five_results_in_order(monkeypatch, capsys):
+    results = [
+        fake_result(
+            f"Fault number {index}",
+            offset=index,
+            similarity=0.9 - index / 100,
+        )
+        for index in range(5)
+    ]
+    monkeypatch.setattr(
+        "builtins.input",
+        Mock(side_effect=["2", "failure", "back", "3"]),
+    )
+
+    cli.run_mode_menu(log_search_fn=Mock(return_value=results))
+
+    output = capsys.readouterr().out
+    assert "Top 5 similar historical faults:" in output
+    for index in range(5):
+        assert f"{index + 1}. Fault number {index}" in output
+
+
 def test_mode_two_allows_several_searches_then_returns_to_the_menu(
     monkeypatch,
     capsys,
 ):
-    semantic_search = Mock(return_value=[])
-    embedded_sentences = [object()]
-    embedder = Mock()
-
+    log_search = Mock(return_value=[])
     monkeypatch.setattr(
         "builtins.input",
         Mock(side_effect=["2", "database", "authentication", "back", "3"]),
     )
 
-    cli.run_mode_menu(
-        semantic_search_fn=semantic_search,
-        embedded_sentences=embedded_sentences,
-        embedder=embedder,
-    )
+    cli.run_mode_menu(log_search_fn=log_search)
 
-    assert semantic_search.call_args_list == [
-        call("database", embedded_sentences, embedder),
-        call("authentication", embedded_sentences, embedder),
+    assert log_search.call_args_list == [
+        call("database"),
+        call("authentication"),
     ]
-
-    output = capsys.readouterr().out
-    assert "Type 'back' to return to the main menu." in output
-    assert output.count("SMART AUTOCOMPLETE") == 2
+    assert capsys.readouterr().out.count("SMART AUTOCOMPLETE") == 2
 
 
-def test_mode_two_never_sends_back_to_semantic_search(monkeypatch):
-    semantic_search = Mock(return_value=[])
-
+def test_mode_two_never_sends_back_to_the_log_search(monkeypatch):
+    log_search = Mock(return_value=[])
     monkeypatch.setattr(
         "builtins.input",
         Mock(side_effect=["2", "back", "3"]),
     )
 
-    cli.run_mode_menu(
-        semantic_search_fn=semantic_search,
-        embedded_sentences=[object()],
-        embedder=Mock(),
-    )
+    cli.run_mode_menu(log_search_fn=log_search)
 
-    semantic_search.assert_not_called()
+    log_search.assert_not_called()
 
 
 @pytest.mark.parametrize("typed", ["BACK", "  back  ", "Back"])
-def test_back_is_recognized_regardless_of_case_and_spacing(
-    monkeypatch,
-    typed,
-):
-    semantic_search = Mock(return_value=[])
-
+def test_back_is_recognized_regardless_of_case_and_spacing(monkeypatch, typed):
+    log_search = Mock(return_value=[])
     monkeypatch.setattr(
         "builtins.input",
         Mock(side_effect=["2", typed, "3"]),
     )
 
-    cli.run_mode_menu(
-        semantic_search_fn=semantic_search,
-        embedded_sentences=[object()],
-        embedder=Mock(),
+    cli.run_mode_menu(log_search_fn=log_search)
+
+    log_search.assert_not_called()
+
+
+def test_a_typed_query_is_only_a_search(monkeypatch):
+    """A typed query must never be recorded as a real fault."""
+    log_search = Mock(return_value=[])
+    monkeypatch.setattr(
+        "builtins.input",
+        Mock(side_effect=["2", "disk failure", "back", "3"]),
     )
 
-    semantic_search.assert_not_called()
+    cli.run_mode_menu(log_search_fn=log_search)
+
+    # Exactly one read-only lookup, with nothing that could append.
+    log_search.assert_called_once_with("disk failure")
+
+
+def test_mode_two_reports_when_nothing_is_similar(monkeypatch, capsys):
+    monkeypatch.setattr(
+        "builtins.input",
+        Mock(side_effect=["2", "unknown topic", "back", "3"]),
+    )
+
+    cli.run_mode_menu(log_search_fn=Mock(return_value=[]))
+
+    assert "No similar historical faults found." in capsys.readouterr().out
+
+
+def test_mode_two_shortens_a_multi_line_entry(monkeypatch, capsys):
+    traceback = (
+        "Corpus preparation failed: boom\nTraceback:\nRuntimeError: boom"
+    )
+    monkeypatch.setattr(
+        "builtins.input",
+        Mock(side_effect=["2", "corpus", "back", "3"]),
+    )
+
+    cli.run_mode_menu(
+        log_search_fn=Mock(return_value=[fake_result(traceback)])
+    )
+
+    output = capsys.readouterr().out
+    assert "1. Corpus preparation failed: boom" in output
+    assert "(2 more line(s) in this entry)" in output
+    assert "RuntimeError: boom" not in output
 
 
 def test_mode_two_survives_a_failed_query_and_keeps_asking(
     monkeypatch,
     capsys,
 ):
-    semantic_search = Mock(
-        side_effect=[RuntimeError("service failed"), []]
-    )
-
+    log_search = Mock(side_effect=[RuntimeError("service failed"), []])
     monkeypatch.setattr(
         "builtins.input",
         Mock(side_effect=["2", "broken", "recovered", "back", "3"]),
     )
 
-    cli.run_mode_menu(
-        semantic_search_fn=semantic_search,
-        embedded_sentences=[object()],
-        embedder=Mock(),
+    cli.run_mode_menu(log_search_fn=log_search)
+
+    assert log_search.call_count == 2
+    output = capsys.readouterr().out
+    assert "Semantic Log Search is temporarily unavailable." in output
+    assert "Traceback" not in output
+
+
+def test_unavailable_log_search_is_reported_and_menu_remains_usable(
+    monkeypatch,
+    capsys,
+):
+    monkeypatch.setattr(
+        "builtins.input",
+        Mock(side_effect=["2", "3"]),
     )
 
-    assert semantic_search.call_count == 2
+    cli.run_mode_menu()
+
     output = capsys.readouterr().out
-    assert "Semantic Search is temporarily unavailable." in output
-    assert "No semantic results found." in output
+    assert "Semantic Log Search is temporarily unavailable." in output
+    assert output.count("SMART AUTOCOMPLETE") == 2
+
+
+def test_mode_three_exits_without_invoking_either_search(monkeypatch):
+    regular_autocomplete = Mock()
+    log_search = Mock()
+    monkeypatch.setattr("builtins.input", Mock(return_value="3"))
+    monkeypatch.setattr(cli, "main", regular_autocomplete)
+
+    cli.run_mode_menu(log_search_fn=log_search)
+
+    regular_autocomplete.assert_not_called()
+    log_search.assert_not_called()
+
+
+@pytest.mark.parametrize("termination", [EOFError(), KeyboardInterrupt()])
+def test_log_search_query_termination_is_clean(
+    monkeypatch,
+    capsys,
+    termination,
+):
+    monkeypatch.setattr(
+        "builtins.input",
+        Mock(side_effect=["2", termination]),
+    )
+
+    cli.run_mode_menu(log_search_fn=Mock(return_value=[]))
+
+    assert "Traceback" not in capsys.readouterr().out
 
 
 def test_exiting_from_the_menu_never_enters_a_mode(monkeypatch, capsys):
     monkeypatch.setattr("builtins.input", Mock(side_effect=["3"]))
 
-    cli.run_mode_menu(
-        semantic_search_fn=Mock(),
-        embedded_sentences=[object()],
-        embedder=Mock(),
-    )
+    cli.run_mode_menu(log_search_fn=Mock())
 
     output = capsys.readouterr().out
     assert "Regular Autocomplete\nType" not in output
-    assert "Enter your query:" not in output
+    assert "Enter an error/message:" not in output
+
+
+# ----------------------------------------------------------------------
+# Query performance metrics
+# ----------------------------------------------------------------------
+
+
+def test_a_query_reports_its_cost(monkeypatch, capsys):
+    monkeypatch.setattr(
+        "builtins.input",
+        Mock(side_effect=["2", "communication failure", "back", "3"]),
+    )
+
+    cli.run_mode_menu(
+        log_search_fn=Mock(return_value=[fake_result(), fake_result()]),
+        log_size_fn=Mock(return_value=1200),
+    )
+
+    output = capsys.readouterr().out
+    assert "Query completed:" in output
+    assert re.search(r"  Search time: \d+\.\d ms", output)
+    assert "  Historical faults searched: 1200" in output
+    assert "  Results returned: 2" in output
+
+
+def test_the_reported_search_time_is_not_negative(monkeypatch, capsys):
+    monkeypatch.setattr(
+        "builtins.input",
+        Mock(side_effect=["2", "failure", "back", "3"]),
+    )
+
+    cli.run_mode_menu(
+        log_search_fn=Mock(return_value=[]),
+        log_size_fn=Mock(return_value=10),
+    )
+
+    match = re.search(r"Search time: (\d+\.\d) ms", capsys.readouterr().out)
+    assert match
+    assert float(match.group(1)) >= 0.0
+
+
+def test_metrics_are_reported_even_when_nothing_matches(monkeypatch, capsys):
+    monkeypatch.setattr(
+        "builtins.input",
+        Mock(side_effect=["2", "unknown", "back", "3"]),
+    )
+
+    cli.run_mode_menu(
+        log_search_fn=Mock(return_value=[]),
+        log_size_fn=Mock(return_value=1200),
+    )
+
+    output = capsys.readouterr().out
+    assert "No similar historical faults found." in output
+    assert "  Results returned: 0" in output
+    assert "  Historical faults searched: 1200" in output
+
+
+def test_each_query_reports_its_own_metrics(monkeypatch, capsys):
+    monkeypatch.setattr(
+        "builtins.input",
+        Mock(side_effect=["2", "first", "second", "back", "3"]),
+    )
+
+    cli.run_mode_menu(
+        log_search_fn=Mock(return_value=[fake_result()]),
+        log_size_fn=Mock(return_value=9),
+    )
+
+    assert capsys.readouterr().out.count("Query completed:") == 2
+
+
+def test_the_corpus_size_is_omitted_when_it_is_unknown(monkeypatch, capsys):
+    monkeypatch.setattr(
+        "builtins.input",
+        Mock(side_effect=["2", "failure", "back", "3"]),
+    )
+
+    cli.run_mode_menu(log_search_fn=Mock(return_value=[fake_result()]))
+
+    output = capsys.readouterr().out
+    assert "Query completed:" in output
+    assert "Historical faults searched:" not in output
+    assert "  Results returned: 1" in output
+
+
+def test_a_failed_query_reports_no_metrics(monkeypatch, capsys):
+    monkeypatch.setattr(
+        "builtins.input",
+        Mock(side_effect=["2", "broken", "back", "3"]),
+    )
+
+    cli.run_mode_menu(
+        log_search_fn=Mock(side_effect=RuntimeError("service failed")),
+        log_size_fn=Mock(return_value=1200),
+    )
+
+    output = capsys.readouterr().out
+    assert "Semantic Log Search is temporarily unavailable." in output
+    assert "Query completed:" not in output
+
+
+def test_the_size_callable_is_not_consulted_before_a_search(monkeypatch):
+    log_size_fn = Mock(return_value=1200)
+    monkeypatch.setattr(
+        "builtins.input",
+        Mock(side_effect=["2", "back", "3"]),
+    )
+
+    cli.run_mode_menu(
+        log_search_fn=Mock(return_value=[]),
+        log_size_fn=log_size_fn,
+    )
+
+    log_size_fn.assert_not_called()
+
+
+def test_query_metrics_are_logged_in_detail(monkeypatch, tmp_path):
+    from src.logging_config import configure_logging, shutdown_logging
+
+    log_path = tmp_path / "autocomplete.log"
+    configure_logging(log_path)
+
+    monkeypatch.setattr(
+        "builtins.input",
+        Mock(side_effect=["2", "disk failure", "back", "3"]),
+    )
+
+    cli.run_mode_menu(
+        log_search_fn=Mock(return_value=[fake_result()]),
+        log_size_fn=Mock(return_value=1200),
+    )
+    shutdown_logging()
+
+    log_text = log_path.read_text(encoding="utf-8")
+    assert re.search(
+        r'Semantic log query "disk failure" completed in \d+\.\d ms over '
+        r"1200 historical fault records, returning 1 results\.",
+        log_text,
+    )

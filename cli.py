@@ -29,7 +29,7 @@ def _print_mode_menu() -> None:
     print("Choose mode:")
     print()
     print("1. Regular Autocomplete")
-    print("2. Semantic Search")
+    print("2. Semantic Log Search")
     print("3. Exit")
     print()
 
@@ -47,32 +47,24 @@ def _run_regular_mode() -> bool:
     return main()
 
 
-def _run_semantic_mode(
-    semantic_search_fn,
-    embedded_sentences,
-    embedder,
-) -> bool:
-    """Answer semantic queries until the user leaves the mode.
+def _run_log_search_mode(log_search_fn, log_size_fn=None) -> bool:
+    """Answer semantic log queries until the user leaves the mode.
 
     Returns ``True`` when the user asked to go back to the main menu, and
     ``False`` when the input stream ended and the application should stop.
     """
-    print("Semantic Search")
+    print("Semantic Log Search")
 
-    if (
-        semantic_search_fn is None
-        or embedded_sentences is None
-        or embedder is None
-    ):
+    if log_search_fn is None:
         print()
-        print("Semantic Search is temporarily unavailable.")
+        print("Semantic Log Search is temporarily unavailable.")
         return True
 
     print(f"Type '{BACK_COMMAND}' to return to the main menu.")
     print()
 
     while True:
-        print("Enter your query:")
+        print("Enter an error/message:")
 
         try:
             query = input()
@@ -87,53 +79,96 @@ def _run_semantic_mode(
             LOGGER.info("The user returned to the main menu.")
             return True
 
-        _print_semantic_results(
-            query,
-            semantic_search_fn,
-            embedded_sentences,
-            embedder,
-        )
+        _print_log_search_results(query, log_search_fn, log_size_fn)
 
 
-def _print_semantic_results(
-    query,
-    semantic_search_fn,
-    embedded_sentences,
-    embedder,
-) -> None:
-    """Run one semantic query and print whatever it returns."""
-    try:
-        results = semantic_search_fn(
-            query,
-            embedded_sentences,
-            embedder,
-        )
-    except Exception:
-        LOGGER.error("Semantic search failed.")
-        print("Semantic Search is temporarily unavailable.")
-        return
+def _format_log_message(message: str) -> list[str]:
+    """Return the display lines for one stored log message.
 
-    if not results:
-        print("No semantic results found.")
-        return
+    A logged exception carries its traceback, which would fill the screen
+    five times over.  Only the first line is shown, with a note saying
+    how much was left out.
+    """
+    lines = message.splitlines() or [""]
 
-    print(f"Here are {len(results)} semantic results:")
+    if len(lines) == 1:
+        return lines
+
+    return [lines[0], f"   ({len(lines) - 1} more line(s) in this entry)"]
+
+
+def _print_query_metrics(elapsed_ms, searched, returned) -> None:
+    """Print the cost of one query, in the units a reader cares about."""
+    print("Query completed:")
+    print(f"  Search time: {elapsed_ms:.1f} ms")
+
+    if searched is not None:
+        print(f"  Historical faults searched: {searched}")
+
+    print(f"  Results returned: {returned}")
     print()
 
-    for position, result in enumerate(results, start=1):
-        print(f"{position}. {result.sentence}")
-        print(f"   Source: {result.source_text}:{result.offset}")
-        print(f"   Similarity: {result.similarity:.3f}")
+
+def _print_log_search_results(query, log_search_fn, log_size_fn=None) -> None:
+    """Run one log search, print its results, then print its cost.
+
+    The timer spans the whole call, so it covers embedding the query as
+    well as scanning the cache: that total is what a user actually waits
+    for.
+    """
+    started = time.perf_counter()
+
+    try:
+        results = log_search_fn(query)
+    except Exception:
+        LOGGER.error("Semantic log search failed.")
+        print("Semantic Log Search is temporarily unavailable.")
+        return
+
+    elapsed_ms = (time.perf_counter() - started) * 1000
+    searched = log_size_fn() if log_size_fn is not None else None
+
+    LOGGER.info(
+        "Semantic log query %s completed in %.1f ms over %s historical "
+        "fault records, returning %d results.",
+        json.dumps(query, ensure_ascii=False),
+        elapsed_ms,
+        "an unknown number of" if searched is None else searched,
+        len(results),
+    )
+
+    if not results:
+        print("No similar historical faults found.")
+        print()
+    else:
+        print(f"Top {len(results)} similar historical faults:")
         print()
 
+        for position, result in enumerate(results, start=1):
+            message, *extra = _format_log_message(result.sentence)
+            print(f"{position}. {message}")
 
-def run_mode_menu(
-    *,
-    semantic_search_fn=None,
-    embedded_sentences=None,
-    embedder=None,
-) -> None:
-    """Run the mode menu with optional injected semantic dependencies."""
+            for line in extra:
+                print(line)
+
+            print(f"   Source: {result.source_text}:{result.offset}")
+            print(f"   Similarity: {result.similarity:.2f}")
+            print()
+
+    _print_query_metrics(elapsed_ms, searched, len(results))
+
+
+def run_mode_menu(*, log_search_fn=None, log_size_fn=None) -> None:
+    """Run the mode menu with an optional injected log search.
+
+    ``log_search_fn`` is called as ``log_search_fn(query)`` and returns
+    ``SemanticResult`` objects.  It is a READ ONLY search: typing a query
+    here is a demo lookup and must never append a fault to the log.
+
+    ``log_size_fn`` is called with no arguments and returns how many
+    historical faults are indexed.  It is used only to report how much
+    was searched, and the mode works without it.
+    """
     while True:
         try:
             _print_mode_menu()
@@ -146,11 +181,7 @@ def run_mode_menu(
                 continue
 
             if choice == "2":
-                if not _run_semantic_mode(
-                    semantic_search_fn,
-                    embedded_sentences,
-                    embedder,
-                ):
+                if not _run_log_search_mode(log_search_fn, log_size_fn):
                     return
 
                 continue
