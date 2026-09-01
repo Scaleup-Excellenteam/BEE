@@ -51,7 +51,7 @@ def test_main_logs_application_and_corpus_lifecycle(
 ):
     log_path = tmp_path / "autocomplete.log"
     index = object()
-    initialize_corpus = Mock(return_value=index)
+    load_or_initialize_corpus = Mock(return_value=index)
     set_corpus_index = Mock()
     run_cli = Mock()
 
@@ -62,8 +62,8 @@ def test_main_logs_application_and_corpus_lifecycle(
     )
     monkeypatch.setattr(
         application_main,
-        "initialize_corpus",
-        initialize_corpus,
+        "load_or_initialize_corpus",
+        load_or_initialize_corpus,
     )
     monkeypatch.setattr(
         application_main,
@@ -93,7 +93,7 @@ def test_main_logs_application_and_corpus_lifecycle(
 
     application_main.main()
 
-    initialize_corpus.assert_called_once_with("Archive.zip")
+    load_or_initialize_corpus.assert_called_once_with("Archive.zip")
     set_corpus_index.assert_called_once_with(index)
     run_cli.assert_called_once_with()
 
@@ -117,7 +117,7 @@ def test_corpus_initialization_error_is_logged(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(
         application_main,
-        "initialize_corpus",
+        "load_or_initialize_corpus",
         Mock(side_effect=RuntimeError("archive could not be opened")),
     )
     monkeypatch.setattr(

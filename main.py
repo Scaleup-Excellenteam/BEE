@@ -7,7 +7,8 @@ import time
 
 from autocomplete import set_corpus_index
 from cli import run_mode_menu as run_cli
-from src.corpus.initialization import initialize_corpus
+from src.corpus.initialization import load_or_initialize_corpus
+
 from src.logging_config import (
     configure_logging,
     get_application_logger,
@@ -120,7 +121,7 @@ def main() -> None:
         initialization_started = time.perf_counter()
 
         try:
-            index = initialize_corpus(args.archive_path)
+            index = load_or_initialize_corpus(args.archive_path)
         except Exception as error:
             elapsed_seconds = time.perf_counter() - initialization_started
             LOGGER.exception(
