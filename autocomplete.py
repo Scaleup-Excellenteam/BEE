@@ -5,16 +5,32 @@ from __future__ import annotations
 from src.corpus.normalizer import normalize_text
 from src.matching.matcher import calculate_best_match
 from src.models import AutoCompleteData
+from src.query_cache import (
+    DEFAULT_QUERY_CACHE_CAPACITY,
+    QueryCacheInfo,
+    QueryResultCache,
+)
 
 
 _corpus_index = None
 _RESULT_LIMIT = 5
+_query_cache = QueryResultCache()
 
 
-def set_corpus_index(index) -> None:
+def set_corpus_index(
+    index,
+    *,
+    query_cache_capacity: int = DEFAULT_QUERY_CACHE_CAPACITY,
+) -> None:
     """Store an already initialized corpus index for reuse."""
-    global _corpus_index
+    global _corpus_index, _query_cache
     _corpus_index = index
+    _query_cache = QueryResultCache(query_cache_capacity)
+
+
+def get_query_cache_info() -> QueryCacheInfo:
+    """Return current autocomplete query-cache statistics."""
+    return _query_cache.info()
 
 
 def passes_partition_filter(query: str, sentence: str) -> bool:
@@ -63,6 +79,10 @@ def get_best_k_completions(prefix: str) -> list[AutoCompleteData]:
     if query == "":
         return []
 
+    cached_completions = _query_cache.get(query)
+    if cached_completions is not None:
+        return cached_completions
+
     candidates = _corpus_index.get_candidates(query)
     exact_candidates = [
         candidate
@@ -76,7 +96,9 @@ def get_best_k_completions(prefix: str) -> list[AutoCompleteData]:
             _build_result(candidate, exact_score)
             for candidate in exact_candidates
         ]
-        return _sort_and_limit(exact_results)
+        results = _sort_and_limit(exact_results)
+        _query_cache.put(query, results)
+        return results
 
     results = []
 
@@ -97,4 +119,6 @@ def get_best_k_completions(prefix: str) -> list[AutoCompleteData]:
 
         results.append(_build_result(candidate, score))
 
-    return _sort_and_limit(results)
+    results = _sort_and_limit(results)
+    _query_cache.put(query, results)
+    return results
