@@ -59,8 +59,8 @@ def fake_dependencies(monkeypatch):
     return normalize_text, calculate_best_match, auto_complete_data
 
 
-def test_raises_when_corpus_index_is_not_configured(monkeypatch):
-    monkeypatch.setattr(autocomplete, "_corpus_index", None)
+def test_raises_when_corpus_index_is_not_configured():
+    autocomplete.set_corpus_index(None)
 
     with pytest.raises(
         RuntimeError,

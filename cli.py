@@ -6,9 +6,27 @@ import time
 
 from autocomplete import get_best_k_completions
 from src.logging_config import get_application_logger
+from src.translation import TranslationError, TranslationService
 
 
 LOGGER = get_application_logger()
+
+TRANSLATE_COMMAND = "/translate"
+SPANISH_COMMAND = "/spanish"
+ENGLISH_COMMAND = "/english"
+TRANSLATION_MODE_ENABLED = (
+    "Translation mode enabled. Target language: English."
+)
+SPANISH_MODE_ENABLED = "Spanish result localization enabled."
+ENGLISH_MODE_ENABLED = "English mode enabled."
+TRANSLATION_UNAVAILABLE = (
+    "Translation mode is unavailable: no translation service configured."
+)
+SPANISH_LOCALIZATION_UNAVAILABLE = (
+    "Spanish localization is unavailable; showing original results."
+)
+TRANSLATED_QUERY_PREFIX = "Translated English query:"
+SPANISH_LANGUAGE_CODE = "es"
 
 
 def _read_windows_prefilled_input(initial_text: str) -> str:
@@ -108,9 +126,11 @@ def _read_prefilled_input(initial_text: str) -> str:
         readline.set_startup_hook()
 
 
-def main() -> None:
+def main(translation_service: TranslationService | None = None) -> None:
     """Run the interactive autocomplete command-line interface."""
     current_input = ""
+    translation_mode = False
+    output_language = None
 
     print("The system is ready. Enter your text:")
 
@@ -131,13 +151,48 @@ def main() -> None:
             )
             continue
 
+        command = user_input.strip().lower()
+        if command == TRANSLATE_COMMAND:
+            translation_mode = True
+            output_language = None
+            print(TRANSLATION_MODE_ENABLED)
+            continue
+        if command == SPANISH_COMMAND:
+            translation_mode = False
+            output_language = SPANISH_LANGUAGE_CODE
+            print(SPANISH_MODE_ENABLED)
+            continue
+        if command == ENGLISH_COMMAND:
+            translation_mode = False
+            output_language = None
+            print(ENGLISH_MODE_ENABLED)
+            continue
+
         current_input = user_input
         logged_query = json.dumps(current_input, ensure_ascii=False)
         LOGGER.info("User submitted a search query: %s", logged_query)
         search_started = time.perf_counter()
 
+        search_query = current_input
+        if translation_mode:
+            if translation_service is None:
+                print(TRANSLATION_UNAVAILABLE)
+                continue
+
+            try:
+                translation = translation_service.translate_to_english(
+                    current_input
+                )
+            except TranslationError as error:
+                LOGGER.warning("Translation failed: %s", error)
+                print(f"Translation failed: {error}")
+                continue
+
+            search_query = translation.translated_text
+            print(f"{TRANSLATED_QUERY_PREFIX} {search_query}")
+
         try:
-            results = get_best_k_completions(current_input)
+            results = get_best_k_completions(search_query)
         except Exception as error:
             elapsed_seconds = time.perf_counter() - search_started
             LOGGER.exception(
@@ -174,7 +229,43 @@ def main() -> None:
             )
             print(f"Here are {len(results)} suggestions:")
 
+            if (
+                output_language == SPANISH_LANGUAGE_CODE
+                and translation_service is None
+            ):
+                print(SPANISH_LOCALIZATION_UNAVAILABLE)
+
             for position, result in enumerate(results, start=1):
+                if output_language == SPANISH_LANGUAGE_CODE:
+                    translated_sentence = None
+                    if translation_service is not None:
+                        try:
+                            translation = translation_service.translate(
+                                result.completed_sentence,
+                                output_language,
+                            )
+                            translated_sentence = translation.translated_text
+                        except TranslationError as error:
+                            LOGGER.warning(
+                                "Spanish localization failed for result "
+                                "%d: %s",
+                                position,
+                                error,
+                            )
+
+                    print(
+                        f"{position}. Original: "
+                        f"{result.completed_sentence}"
+                    )
+                    if translated_sentence is None:
+                        print("   Spanish: unavailable")
+                    else:
+                        print(f"   Spanish: {translated_sentence}")
+                    print(f"   Source: {result.source_text}")
+                    print(f"   Offset: {result.offset}")
+                    print(f"   Score: {result.score}")
+                    continue
+
                 print(
                     f"{position}. {result.completed_sentence} "
                     f"({result.source_text}:{result.offset}, "

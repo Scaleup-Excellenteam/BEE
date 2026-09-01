@@ -72,6 +72,11 @@ def test_main_logs_application_and_corpus_lifecycle(
     )
     monkeypatch.setattr(application_main, "run_cli", run_cli)
     monkeypatch.setattr(
+        application_main,
+        "_initialize_translation_service",
+        Mock(return_value=None),
+    )
+    monkeypatch.setattr(
         application_main.time,
         "perf_counter",
         Mock(side_effect=[10.0, 12.5]),
@@ -200,7 +205,7 @@ def test_cli_logs_query_reset_and_search_results_without_changing_output(
     assert "Application closed by the user." in log_text
 
 
-def test_logging_does_not_change_autocomplete_results(monkeypatch, tmp_path):
+def test_logging_does_not_change_autocomplete_results(tmp_path):
     log_path = tmp_path / "autocomplete.log"
     configure_logging(log_path)
 
@@ -212,7 +217,7 @@ def test_logging_does_not_change_autocomplete_results(monkeypatch, tmp_path):
             offset=1,
         )
     ]
-    monkeypatch.setattr(autocomplete, "_corpus_index", CorpusIndex(records))
+    autocomplete.set_corpus_index(CorpusIndex(records))
 
     results = autocomplete.get_best_k_completions("HELLO!")
 
