@@ -6,6 +6,7 @@ import time
 
 from autocomplete import get_best_k_completions
 from src.logging_config import get_application_logger
+from src.translation import translate_to_spanish
 
 
 LOGGER = get_application_logger()
@@ -175,8 +176,11 @@ def main() -> None:
             print(f"Here are {len(results)} suggestions:")
 
             for position, result in enumerate(results, start=1):
+                translated_sentence = translate_to_spanish(
+                    result.completed_sentence
+                )
                 print(
-                    f"{position}. {result.completed_sentence} "
+                    f"{position}. {translated_sentence} "
                     f"({result.source_text}:{result.offset}, "
                     f"score={result.score})"
                 )

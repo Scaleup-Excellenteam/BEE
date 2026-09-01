@@ -155,6 +155,11 @@ def test_cli_logs_query_reset_and_search_results_without_changing_output(
         get_best_k_completions,
     )
     monkeypatch.setattr(
+        cli,
+        "translate_to_spanish",
+        lambda text: text,
+    )
+    monkeypatch.setattr(
         cli.time,
         "perf_counter",
         Mock(side_effect=[1.0, 1.25, 2.0, 2.5]),

@@ -135,7 +135,12 @@ def test_text_after_hash_starts_from_empty_state(monkeypatch):
     ]
 
 
-def _run_cli_with_results(monkeypatch, capsys, results):
+def _run_cli_with_results(
+    monkeypatch,
+    capsys,
+    results,
+    translate_to_spanish=lambda text: text,
+):
     """Run one query through the CLI and return everything it printed."""
     read_prefilled_input = Mock(
         side_effect=[
@@ -154,6 +159,11 @@ def _run_cli_with_results(monkeypatch, capsys, results):
         cli,
         "get_best_k_completions",
         get_best_k_completions,
+    )
+    monkeypatch.setattr(
+        cli,
+        "translate_to_spanish",
+        translate_to_spanish,
     )
 
     cli.main()
@@ -197,6 +207,61 @@ def test_numbers_suggestions_in_returned_order(monkeypatch, capsys):
             f"{position}. Sentence {position} "
             f"(example.txt:{position}, score=14)"
         ) in output
+
+
+def test_translates_each_completed_sentence_before_printing(
+    monkeypatch,
+    capsys,
+):
+    results = [
+        FakeAutoCompleteData(
+            completed_sentence=f"Sentence {position}",
+            source_text="example.txt",
+            offset=position,
+            score=14,
+        )
+        for position in range(1, 3)
+    ]
+    translate_to_spanish = Mock(
+        side_effect=lambda text: f"[ES] {text}"
+    )
+
+    output = _run_cli_with_results(
+        monkeypatch,
+        capsys,
+        results,
+        translate_to_spanish=translate_to_spanish,
+    )
+
+    assert translate_to_spanish.call_args_list == [
+        call("Sentence 1"),
+        call("Sentence 2"),
+    ]
+    assert "1. [ES] Sentence 1 (example.txt:1, score=14)" in output
+    assert "2. [ES] Sentence 2 (example.txt:2, score=14)" in output
+
+
+def test_falls_back_to_original_sentence_when_translation_fails(
+    monkeypatch,
+    capsys,
+):
+    result = FakeAutoCompleteData(
+        completed_sentence="Untranslatable sentence",
+        source_text="example.txt",
+        offset=1,
+        score=10,
+    )
+
+    output = _run_cli_with_results(
+        monkeypatch,
+        capsys,
+        [result],
+        translate_to_spanish=lambda text: text,
+    )
+
+    assert (
+        "1. Untranslatable sentence (example.txt:1, score=10)" in output
+    )
 
 
 def test_reports_when_no_suggestions_are_found(monkeypatch, capsys):
