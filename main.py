@@ -1,6 +1,7 @@
 """Application startup for the integrated autocomplete system."""
 
 import argparse
+import importlib
 import json
 import time
 
@@ -13,6 +14,7 @@ from src.logging_config import (
     shutdown_logging,
 )
 from src.logsearch.log_index import LogSearchService
+from src.translation import GoogleTranslationService, TranslationService
 
 
 LOGGER = get_application_logger()
@@ -62,6 +64,36 @@ def initialize_log_search() -> LogSearchService:
     print(f"  Initialization time: {elapsed_seconds:.3f} sec")
     print()
 
+    return service
+
+
+def _initialize_translation_service() -> TranslationService | None:
+    """Return an available Translation service without blocking Part A."""
+    try:
+        service = GoogleTranslationService()
+        if not service.project_id:
+            LOGGER.warning(
+                "Translation is unavailable because "
+                "GOOGLE_CLOUD_PROJECT is not configured."
+            )
+            return None
+
+        importlib.import_module("google.cloud.translate_v3")
+    except ImportError:
+        LOGGER.warning(
+            "Translation is unavailable because google-cloud-translate "
+            "is not installed."
+        )
+        return None
+    except Exception as error:
+        LOGGER.warning(
+            "Translation service initialization failed (%s). "
+            "Part A remains available.",
+            type(error).__name__,
+        )
+        return None
+
+    LOGGER.info("Translation service is configured and ready.")
     return service
 
 
@@ -121,21 +153,31 @@ def main() -> None:
             )
             log_search = None
 
-        if log_search is None:
-            run_cli()
-        else:
-            try:
-                # The service is built once here and reused for every
-                # mode 2 entry.  Mode 2 records: each message is matched
-                # against the history and then becomes part of it, which
-                # is why the CLI is given record_error rather than the
-                # read-only search.
-                run_cli(
-                    record_fault_fn=log_search.record_error,
-                    log_size_fn=lambda: len(log_search),
-                    storage_status_fn=log_search.storage_status,
-                )
-            finally:
+        translation_service = _initialize_translation_service()
+
+        # Two independent optional features.  Each contributes its own
+        # keyword arguments, so the CLI can lose one of them without
+        # losing the other, and Part A runs even without both.
+        cli_arguments = {}
+
+        if log_search is not None:
+            # The service is built once here and reused for every mode 2
+            # entry.  Mode 2 records: each message is matched against the
+            # history and then becomes part of it, which is why the CLI
+            # is given record_error rather than the read-only search.
+            cli_arguments.update(
+                record_fault_fn=log_search.record_error,
+                log_size_fn=lambda: len(log_search),
+                storage_status_fn=log_search.storage_status,
+            )
+
+        if translation_service is not None:
+            cli_arguments["translation_service"] = translation_service
+
+        try:
+            run_cli(**cli_arguments)
+        finally:
+            if log_search is not None:
                 log_search.close()
     finally:
         shutdown_logging()

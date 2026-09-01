@@ -103,7 +103,8 @@ def test_mode_one_reuses_regular_autocomplete(monkeypatch):
 
     cli.run_mode_menu()
 
-    regular_autocomplete.assert_called_once_with()
+    # Mode 1 forwards the translation service; none is configured here.
+    regular_autocomplete.assert_called_once_with(translation_service=None)
 
 
 def test_mode_one_preserves_hash_reset_behavior(monkeypatch):
