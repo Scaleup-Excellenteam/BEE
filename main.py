@@ -1,6 +1,7 @@
 """Application startup for the integrated autocomplete system."""
 
 import argparse
+import importlib
 import json
 import time
 
@@ -12,9 +13,40 @@ from src.logging_config import (
     get_application_logger,
     shutdown_logging,
 )
+from src.translation import GoogleTranslationService, TranslationService
 
 
 LOGGER = get_application_logger()
+
+
+def _initialize_translation_service() -> TranslationService | None:
+    """Return an available Translation service without blocking Part A."""
+    try:
+        service = GoogleTranslationService()
+        if not service.project_id:
+            LOGGER.warning(
+                "Translation is unavailable because "
+                "GOOGLE_CLOUD_PROJECT is not configured."
+            )
+            return None
+
+        importlib.import_module("google.cloud.translate_v3")
+    except ImportError:
+        LOGGER.warning(
+            "Translation is unavailable because google-cloud-translate "
+            "is not installed."
+        )
+        return None
+    except Exception as error:
+        LOGGER.warning(
+            "Translation service initialization failed (%s). "
+            "Part A remains available.",
+            type(error).__name__,
+        )
+        return None
+
+    LOGGER.info("Translation service is configured and ready.")
+    return service
 
 
 def main() -> None:
@@ -59,7 +91,11 @@ def main() -> None:
 
         set_corpus_index(index)
         LOGGER.info("The autocomplete system is ready for searches.")
-        run_cli()
+        translation_service = _initialize_translation_service()
+        if translation_service is None:
+            run_cli()
+        else:
+            run_cli(translation_service=translation_service)
     finally:
         shutdown_logging()
 

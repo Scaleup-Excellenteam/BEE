@@ -3,3 +3,13 @@ extracted_archive/
 __pycache__/
 .pytest_cache/
 logs/
+*.py[cod]
+
+# Local environment and Google credential files. Keep credentials outside
+# the repository; do not ignore all JSON because the project may use it.
+.env
+.env.*
+!.env.example
+*service-account*.json
+google-application-credentials*.json
+application_default_credentials.json
