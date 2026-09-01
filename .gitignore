@@ -1,0 +1,5 @@
+Archive.zip
+extracted_archive/
+__pycache__/
+.pytest_cache/
+logs/
