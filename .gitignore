@@ -1,5 +1,26 @@
 Archive.zip
 extracted_archive/
 __pycache__/
+*.py[cod]
 .pytest_cache/
 logs/
+
+
+# Local environment and Google credential files. Keep credentials outside
+# the repository; do not ignore all JSON because the project may use it.
+.env
+.env.*
+!.env.example
+*service-account*.json
+google-application-credentials*.json
+application_default_credentials.json
+
+# Derived semantic caches and the canonical fault history.
+embedding_cache/
+embedding_cache_test/
+log_embedding_cache/
+logs/satellite_incidents.jsonl
+satellite_fault_cache/
+
+corpus_index.sqlite3
+.corpus_index.sqlite3.*.tmp

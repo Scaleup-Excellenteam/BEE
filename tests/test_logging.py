@@ -51,7 +51,7 @@ def test_main_logs_application_and_corpus_lifecycle(
 ):
     log_path = tmp_path / "autocomplete.log"
     index = object()
-    initialize_corpus = Mock(return_value=index)
+    load_or_initialize_corpus = Mock(return_value=index)
     set_corpus_index = Mock()
     run_cli = Mock()
 
@@ -62,8 +62,8 @@ def test_main_logs_application_and_corpus_lifecycle(
     )
     monkeypatch.setattr(
         application_main,
-        "initialize_corpus",
-        initialize_corpus,
+        "load_or_initialize_corpus",
+        load_or_initialize_corpus,
     )
     monkeypatch.setattr(
         application_main,
@@ -71,6 +71,19 @@ def test_main_logs_application_and_corpus_lifecycle(
         set_corpus_index,
     )
     monkeypatch.setattr(application_main, "run_cli", run_cli)
+    # Semantic Log Search is exercised in tests/test_main_log_search.py.
+    # Stubbing it here keeps this logging test from loading the local
+    # model and building a real cache.
+    monkeypatch.setattr(
+        application_main,
+        "initialize_log_search",
+        Mock(return_value=None),
+    )
+    monkeypatch.setattr(
+        application_main,
+        "_initialize_translation_service",
+        Mock(return_value=None),
+    )
     monkeypatch.setattr(
         application_main.time,
         "perf_counter",
@@ -80,7 +93,7 @@ def test_main_logs_application_and_corpus_lifecycle(
 
     application_main.main()
 
-    initialize_corpus.assert_called_once_with("Archive.zip")
+    load_or_initialize_corpus.assert_called_once_with("Archive.zip")
     set_corpus_index.assert_called_once_with(index)
     run_cli.assert_called_once_with()
 
@@ -104,7 +117,7 @@ def test_corpus_initialization_error_is_logged(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(
         application_main,
-        "initialize_corpus",
+        "load_or_initialize_corpus",
         Mock(side_effect=RuntimeError("archive could not be opened")),
     )
     monkeypatch.setattr(
@@ -200,7 +213,7 @@ def test_cli_logs_query_reset_and_search_results_without_changing_output(
     assert "Application closed by the user." in log_text
 
 
-def test_logging_does_not_change_autocomplete_results(monkeypatch, tmp_path):
+def test_logging_does_not_change_autocomplete_results(tmp_path):
     log_path = tmp_path / "autocomplete.log"
     configure_logging(log_path)
 
@@ -212,7 +225,7 @@ def test_logging_does_not_change_autocomplete_results(monkeypatch, tmp_path):
             offset=1,
         )
     ]
-    monkeypatch.setattr(autocomplete, "_corpus_index", CorpusIndex(records))
+    autocomplete.set_corpus_index(CorpusIndex(records))
 
     results = autocomplete.get_best_k_completions("HELLO!")
 

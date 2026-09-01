@@ -6,8 +6,8 @@ from src.corpus.normalizer import normalize_text
 from src.models import AutoCompleteData, SentenceRecord
 
 
-def test_real_autocomplete_integration(monkeypatch):
-    monkeypatch.setattr(autocomplete, "_corpus_index", None)
+def test_real_autocomplete_integration():
+    autocomplete.set_corpus_index(None)
 
     records = [
         SentenceRecord(

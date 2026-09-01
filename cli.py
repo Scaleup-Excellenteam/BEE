@@ -6,9 +6,317 @@ import time
 
 from autocomplete import get_best_k_completions
 from src.logging_config import get_application_logger
+from src.translation import TranslationError, TranslationService
 
 
 LOGGER = get_application_logger()
+
+TRANSLATE_COMMAND = "/translate"
+SPANISH_COMMAND = "/spanish"
+ENGLISH_COMMAND = "/english"
+TRANSLATION_MODE_ENABLED = (
+    "Translation mode enabled. Target language: English."
+)
+SPANISH_MODE_ENABLED = "Spanish result localization enabled."
+ENGLISH_MODE_ENABLED = "English mode enabled."
+TRANSLATION_UNAVAILABLE = (
+    "Translation mode is unavailable: no translation service configured."
+)
+SPANISH_LOCALIZATION_UNAVAILABLE = (
+    "Spanish localization is unavailable; showing original results."
+)
+TRANSLATED_QUERY_PREFIX = "Translated English query:"
+SPANISH_LANGUAGE_CODE = "es"
+
+# Typed inside a mode to return to the main menu.  It is navigation only:
+# it is never passed to autocomplete or to semantic search.
+BACK_COMMAND = "back"
+
+
+def _is_back_command(user_input: str) -> bool:
+    """Return whether the user asked to return to the main menu."""
+    return user_input.strip().lower() == BACK_COMMAND
+
+
+def _print_mode_menu() -> None:
+    """Display the application's top-level mode choices."""
+    print("=" * 32)
+    print("       SMART AUTOCOMPLETE")
+    print("=" * 32)
+    print()
+    print("Choose mode:")
+    print()
+    print("1. Regular Autocomplete")
+    print("2. Semantic Log Search")
+    print("3. Exit")
+    print()
+
+
+def _run_regular_mode(translation_service=None) -> bool:
+    """Run Part A autocomplete until the user leaves the mode.
+
+    Returns ``True`` when the user asked to go back to the main menu, and
+    ``False`` when the input stream ended and the application should stop.
+    """
+    print("Regular Autocomplete")
+    print(f"Type '{BACK_COMMAND}' to return to the main menu.")
+    print()
+
+    return main(translation_service=translation_service)
+
+
+def _run_log_search_mode(
+    record_fault_fn,
+    log_size_fn=None,
+    storage_status_fn=None,
+) -> bool:
+    """Record incoming faults until the user leaves the mode.
+
+    Every message entered here is treated as a REAL satellite fault: it
+    is matched against the incident history first, then recorded.
+
+    Returns ``True`` when the user asked to go back to the main menu, and
+    ``False`` when the input stream ended and the application should stop.
+    """
+    print("Semantic Log Search")
+
+    if record_fault_fn is None:
+        print()
+        print("Semantic Log Search is temporarily unavailable.")
+        return True
+
+    print(f"Type '{BACK_COMMAND}' to return to the main menu.")
+    print("Each message entered is recorded as a new satellite fault.")
+    print()
+
+    while True:
+        print("Enter an error/message:")
+
+        try:
+            query = input()
+        except EOFError:
+            LOGGER.info("Application closed by the user.")
+            return False
+        except KeyboardInterrupt:
+            LOGGER.info("Application interrupted by the user.")
+            return False
+
+        # Navigation is not a fault, and neither is an empty line.
+        if _is_back_command(query):
+            LOGGER.info("The user returned to the main menu.")
+            return True
+
+        if not query.strip():
+            print("Please enter a fault message.")
+            print()
+            continue
+
+        _record_and_report_fault(
+            query,
+            record_fault_fn,
+            log_size_fn,
+            storage_status_fn,
+        )
+
+
+def _format_log_message(message: str) -> list[str]:
+    """Return the display lines for one stored fault message.
+
+    A logged exception carries its traceback, which would fill the screen
+    five times over.  Only the first line is shown, with a note saying
+    how much was left out.
+    """
+    lines = message.splitlines() or [""]
+
+    if len(lines) == 1:
+        return lines
+
+    return [lines[0], f"   ({len(lines) - 1} more line(s) in this entry)"]
+
+
+def _print_incident(position, match) -> None:
+    """Print one matched incident and the metadata worth knowing."""
+    message, *extra = _format_log_message(match.message)
+    print(f"{position}. {message}")
+
+    for line in extra:
+        print(line)
+
+    print(f"   Similarity: {match.similarity:.2f}")
+    print(f"   Subsystem: {match.subsystem}")
+    print(f"   Severity: {match.severity}")
+    print(f"   Occurrences: {match.count}")
+
+    # Where the fault came from, kept from the previous CLI.
+    if match.source_text:
+        print(f"   Source: {match.source_text}:{match.offset}")
+
+    if match.error_code:
+        print(f"   Error code: {match.error_code}")
+
+    if match.first_seen:
+        print(f"   First seen: {match.first_seen}")
+
+    if match.last_seen:
+        print(f"   Last seen: {match.last_seen}")
+
+    # Only shown when someone actually recorded them, so a bare incident
+    # does not print two empty labels.
+    if match.previous_action:
+        print(f"   Previous action: {match.previous_action}")
+
+    if match.outcome:
+        print(f"   Outcome: {match.outcome}")
+
+    print()
+
+
+def _print_query_metrics(elapsed_ms, searched, returned) -> None:
+    """Print the cost of one query, in the units a reader cares about."""
+    print("Query completed:")
+    print(f"  Search time: {elapsed_ms:.1f} ms")
+
+    if searched is not None:
+        print(f"  Historical faults searched: {searched}")
+
+    print(f"  Results returned: {returned}")
+    print()
+
+
+def _print_storage_note(result, storage_status_fn) -> None:
+    """Print at most two short lines about what storage did.
+
+    Retention internals stay out of the way; an operator only needs to
+    know whether the fault was kept and roughly how full memory is.
+    """
+    if not result.stored:
+        print(
+            "Fault was analyzed but not persisted: memory capacity "
+            "reserved for critical incidents."
+        )
+
+    if result.evicted_incident_id is not None:
+        print(
+            "Fault memory full: one lower-priority historical incident "
+            "was evicted."
+        )
+
+    if storage_status_fn is not None:
+        status = storage_status_fn()
+        print(
+            f"Fault memory: {status['incidents']} / "
+            f"{status['max_incidents']} incidents"
+        )
+
+    print()
+
+
+def _record_and_report_fault(
+    message,
+    record_fault_fn,
+    log_size_fn=None,
+    storage_status_fn=None,
+) -> None:
+    """Record one incoming fault and print the incidents it resembles.
+
+    The history size is read BEFORE recording, so the reported figure is
+    the history the fault was actually compared against rather than the
+    history it then became part of.
+
+    The timer spans the whole call, so it covers embedding the message,
+    scanning the cache and storing the fault: that total is what a user
+    actually waits for.
+    """
+    searched = log_size_fn() if log_size_fn is not None else None
+    started = time.perf_counter()
+
+    try:
+        outcome = record_fault_fn(message)
+    except Exception:
+        LOGGER.error("Semantic log search failed.")
+        print("Semantic Log Search is temporarily unavailable.")
+        return
+
+    elapsed_ms = (time.perf_counter() - started) * 1000
+    results = outcome.matches
+
+    LOGGER.info(
+        "Satellite fault %s matched in %.1f ms against %s historical "
+        "fault records, returning %d results (%s).",
+        json.dumps(message, ensure_ascii=False),
+        elapsed_ms,
+        "an unknown number of" if searched is None else searched,
+        len(results),
+        outcome.reason,
+    )
+
+    if not results:
+        print("No similar historical faults found.")
+        print()
+    else:
+        print(f"Top {len(results)} similar historical faults:")
+        print()
+
+        for position, match in enumerate(results, start=1):
+            _print_incident(position, match)
+
+    _print_storage_note(outcome, storage_status_fn)
+    _print_query_metrics(elapsed_ms, searched, len(results))
+
+
+def run_mode_menu(
+    *,
+    record_fault_fn=None,
+    log_size_fn=None,
+    storage_status_fn=None,
+    translation_service=None,
+) -> None:
+    """Run the mode menu with an optional injected fault recorder.
+
+    ``record_fault_fn`` is called as ``record_fault_fn(message)``.  It
+    searches the incident history, returns the matching incidents, and
+    only THEN records the message, so a fault can never be returned as a
+    match for itself.
+
+    ``log_size_fn`` is called with no arguments and returns how many
+    incidents are recorded.  It is used only to report how much was
+    searched, and the mode works without it.
+
+    ``translation_service`` enables the ``/translate``, ``/spanish`` and
+    ``/english`` commands inside Regular Autocomplete.  All three
+    features are independent: any of them may be absent.
+    """
+    while True:
+        try:
+            _print_mode_menu()
+            choice = input("> ").strip()
+
+            if choice == "1":
+                if not _run_regular_mode(translation_service):
+                    return
+
+                continue
+
+            if choice == "2":
+                if not _run_log_search_mode(
+                    record_fault_fn,
+                    log_size_fn,
+                    storage_status_fn,
+                ):
+                    return
+
+                continue
+
+            if choice == "3":
+                return
+
+            print("Invalid option. Please choose 1, 2, or 3.")
+        except EOFError:
+            LOGGER.info("Application closed by the user.")
+            return
+        except KeyboardInterrupt:
+            LOGGER.info("Application interrupted by the user.")
+            return
 
 
 def _read_windows_prefilled_input(initial_text: str) -> str:
@@ -108,9 +416,21 @@ def _read_prefilled_input(initial_text: str) -> str:
         readline.set_startup_hook()
 
 
-def main() -> None:
-    """Run the interactive autocomplete command-line interface."""
+def main(translation_service: TranslationService | None = None) -> bool:
+    """Run the interactive autocomplete command-line interface.
+
+    ``/translate`` searches in English regardless of what the operator
+    types, ``/spanish`` shows every result in Spanish alongside the
+    original, and ``/english`` returns to plain output.  Without a
+    translation service the modes announce themselves as unavailable and
+    ordinary autocomplete carries on.
+
+    Returns ``True`` when the user asked to go back to the main menu, and
+    ``False`` when the input stream ended and the application should stop.
+    """
     current_input = ""
+    translation_mode = False
+    output_language = None
 
     print("The system is ready. Enter your text:")
 
@@ -119,10 +439,17 @@ def main() -> None:
             user_input = _read_prefilled_input(current_input)
         except EOFError:
             LOGGER.info("Application closed by the user.")
-            return
+            return False
         except KeyboardInterrupt:
             LOGGER.info("Application interrupted by the user.")
-            return
+            return False
+
+        # Navigation is checked first so that "back" never reaches the
+        # autocomplete engine.  It cannot contain "#", so the reset rule
+        # below is unaffected.
+        if _is_back_command(user_input):
+            LOGGER.info("The user returned to the main menu.")
+            return True
 
         if "#" in user_input:
             current_input = ""
@@ -131,13 +458,50 @@ def main() -> None:
             )
             continue
 
+        # Mode switches, never search text.  Checked after "back" and
+        # "#" so neither of those behaviours changes.
+        command = user_input.strip().lower()
+        if command == TRANSLATE_COMMAND:
+            translation_mode = True
+            output_language = None
+            print(TRANSLATION_MODE_ENABLED)
+            continue
+        if command == SPANISH_COMMAND:
+            translation_mode = False
+            output_language = SPANISH_LANGUAGE_CODE
+            print(SPANISH_MODE_ENABLED)
+            continue
+        if command == ENGLISH_COMMAND:
+            translation_mode = False
+            output_language = None
+            print(ENGLISH_MODE_ENABLED)
+            continue
+
         current_input = user_input
         logged_query = json.dumps(current_input, ensure_ascii=False)
         LOGGER.info("User submitted a search query: %s", logged_query)
         search_started = time.perf_counter()
 
+        search_query = current_input
+        if translation_mode:
+            if translation_service is None:
+                print(TRANSLATION_UNAVAILABLE)
+                continue
+
+            try:
+                translation = translation_service.translate_to_english(
+                    current_input
+                )
+            except TranslationError as error:
+                LOGGER.warning("Translation failed: %s", error)
+                print(f"Translation failed: {error}")
+                continue
+
+            search_query = translation.translated_text
+            print(f"{TRANSLATED_QUERY_PREFIX} {search_query}")
+
         try:
-            results = get_best_k_completions(current_input)
+            results = get_best_k_completions(search_query)
         except Exception as error:
             elapsed_seconds = time.perf_counter() - search_started
             LOGGER.exception(
@@ -174,7 +538,43 @@ def main() -> None:
             )
             print(f"Here are {len(results)} suggestions:")
 
+            if (
+                output_language == SPANISH_LANGUAGE_CODE
+                and translation_service is None
+            ):
+                print(SPANISH_LOCALIZATION_UNAVAILABLE)
+
             for position, result in enumerate(results, start=1):
+                if output_language == SPANISH_LANGUAGE_CODE:
+                    translated_sentence = None
+                    if translation_service is not None:
+                        try:
+                            translation = translation_service.translate(
+                                result.completed_sentence,
+                                output_language,
+                            )
+                            translated_sentence = translation.translated_text
+                        except TranslationError as error:
+                            LOGGER.warning(
+                                "Spanish localization failed for result "
+                                "%d: %s",
+                                position,
+                                error,
+                            )
+
+                    print(
+                        f"{position}. Original: "
+                        f"{result.completed_sentence}"
+                    )
+                    if translated_sentence is None:
+                        print("   Spanish: unavailable")
+                    else:
+                        print(f"   Spanish: {translated_sentence}")
+                    print(f"   Source: {result.source_text}")
+                    print(f"   Offset: {result.offset}")
+                    print(f"   Score: {result.score}")
+                    continue
+
                 print(
                     f"{position}. {result.completed_sentence} "
                     f"({result.source_text}:{result.offset}, "
@@ -183,4 +583,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    run_mode_menu()
