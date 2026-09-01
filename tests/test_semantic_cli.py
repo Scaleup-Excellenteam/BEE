@@ -7,6 +7,7 @@ from unittest.mock import Mock, call
 import pytest
 
 import cli
+from src.logsearch.incidents import RecordFaultResult
 
 
 @dataclass
@@ -25,6 +26,19 @@ class FakeIncidentMatch:
     outcome: str | None = None
     source_text: str = "satellite_incidents.jsonl"
     offset: int = 1
+
+
+def recorded(*matches, stored=True, deduplicated=False, incident_id=1,
+             evicted_incident_id=None, reason="NEW_INCIDENT_STORED"):
+    """Return what record_error now hands back."""
+    return RecordFaultResult(
+        matches=list(matches),
+        stored=stored,
+        deduplicated=deduplicated,
+        incident_id=incident_id,
+        evicted_incident_id=evicted_incident_id,
+        reason=reason,
+    )
 
 
 def fake_result(
@@ -252,7 +266,7 @@ def test_mode_one_can_be_re_entered_after_going_back(monkeypatch):
 
 
 def test_mode_two_searches_the_log_and_displays_results(monkeypatch, capsys):
-    log_search = Mock(return_value=[fake_result()])
+    log_search = Mock(return_value=recorded(fake_result()))
     monkeypatch.setattr(
         "builtins.input",
         Mock(side_effect=["2", "communication failure", "back", "3"]),
@@ -290,7 +304,7 @@ def test_mode_two_displays_five_results_in_order(monkeypatch, capsys):
         Mock(side_effect=["2", "failure", "back", "3"]),
     )
 
-    cli.run_mode_menu(record_fault_fn=Mock(return_value=results))
+    cli.run_mode_menu(record_fault_fn=Mock(return_value=recorded(*results)))
 
     output = capsys.readouterr().out
     assert "Top 5 similar historical faults:" in output
@@ -302,7 +316,7 @@ def test_mode_two_allows_several_searches_then_returns_to_the_menu(
     monkeypatch,
     capsys,
 ):
-    log_search = Mock(return_value=[])
+    log_search = Mock(return_value=recorded())
     monkeypatch.setattr(
         "builtins.input",
         Mock(side_effect=["2", "database", "authentication", "back", "3"]),
@@ -318,7 +332,7 @@ def test_mode_two_allows_several_searches_then_returns_to_the_menu(
 
 
 def test_mode_two_never_sends_back_to_the_log_search(monkeypatch):
-    log_search = Mock(return_value=[])
+    log_search = Mock(return_value=recorded())
     monkeypatch.setattr(
         "builtins.input",
         Mock(side_effect=["2", "back", "3"]),
@@ -331,7 +345,7 @@ def test_mode_two_never_sends_back_to_the_log_search(monkeypatch):
 
 @pytest.mark.parametrize("typed", ["BACK", "  back  ", "Back"])
 def test_back_is_recognized_regardless_of_case_and_spacing(monkeypatch, typed):
-    log_search = Mock(return_value=[])
+    log_search = Mock(return_value=recorded())
     monkeypatch.setattr(
         "builtins.input",
         Mock(side_effect=["2", typed, "3"]),
@@ -344,7 +358,7 @@ def test_back_is_recognized_regardless_of_case_and_spacing(monkeypatch, typed):
 
 def test_every_entered_message_is_recorded_as_a_fault(monkeypatch):
     """A typed query must never be recorded as a real fault."""
-    log_search = Mock(return_value=[])
+    log_search = Mock(return_value=recorded())
     monkeypatch.setattr(
         "builtins.input",
         Mock(side_effect=["2", "disk failure", "back", "3"]),
@@ -362,7 +376,7 @@ def test_mode_two_reports_when_nothing_is_similar(monkeypatch, capsys):
         Mock(side_effect=["2", "unknown topic", "back", "3"]),
     )
 
-    cli.run_mode_menu(record_fault_fn=Mock(return_value=[]))
+    cli.run_mode_menu(record_fault_fn=Mock(return_value=recorded()))
 
     assert "No similar historical faults found." in capsys.readouterr().out
 
@@ -377,7 +391,7 @@ def test_mode_two_shortens_a_multi_line_entry(monkeypatch, capsys):
     )
 
     cli.run_mode_menu(
-        record_fault_fn=Mock(return_value=[fake_result(traceback)])
+        record_fault_fn=Mock(return_value=recorded(fake_result(traceback)))
     )
 
     output = capsys.readouterr().out
@@ -390,7 +404,7 @@ def test_mode_two_survives_a_failed_query_and_keeps_asking(
     monkeypatch,
     capsys,
 ):
-    log_search = Mock(side_effect=[RuntimeError("service failed"), []])
+    log_search = Mock(side_effect=[RuntimeError("service failed"), recorded()])
     monkeypatch.setattr(
         "builtins.input",
         Mock(side_effect=["2", "broken", "recovered", "back", "3"]),
@@ -443,7 +457,7 @@ def test_log_search_query_termination_is_clean(
         Mock(side_effect=["2", termination]),
     )
 
-    cli.run_mode_menu(record_fault_fn=Mock(return_value=[]))
+    cli.run_mode_menu(record_fault_fn=Mock(return_value=recorded()))
 
     assert "Traceback" not in capsys.readouterr().out
 
@@ -470,7 +484,7 @@ def test_a_query_reports_its_cost(monkeypatch, capsys):
     )
 
     cli.run_mode_menu(
-        record_fault_fn=Mock(return_value=[fake_result(), fake_result()]),
+        record_fault_fn=Mock(return_value=recorded(fake_result(), fake_result())),
         log_size_fn=Mock(return_value=1200),
     )
 
@@ -488,7 +502,7 @@ def test_the_reported_search_time_is_not_negative(monkeypatch, capsys):
     )
 
     cli.run_mode_menu(
-        record_fault_fn=Mock(return_value=[]),
+        record_fault_fn=Mock(return_value=recorded()),
         log_size_fn=Mock(return_value=10),
     )
 
@@ -504,7 +518,7 @@ def test_metrics_are_reported_even_when_nothing_matches(monkeypatch, capsys):
     )
 
     cli.run_mode_menu(
-        record_fault_fn=Mock(return_value=[]),
+        record_fault_fn=Mock(return_value=recorded()),
         log_size_fn=Mock(return_value=1200),
     )
 
@@ -521,7 +535,7 @@ def test_each_query_reports_its_own_metrics(monkeypatch, capsys):
     )
 
     cli.run_mode_menu(
-        record_fault_fn=Mock(return_value=[fake_result()]),
+        record_fault_fn=Mock(return_value=recorded(fake_result())),
         log_size_fn=Mock(return_value=9),
     )
 
@@ -534,7 +548,7 @@ def test_the_corpus_size_is_omitted_when_it_is_unknown(monkeypatch, capsys):
         Mock(side_effect=["2", "failure", "back", "3"]),
     )
 
-    cli.run_mode_menu(record_fault_fn=Mock(return_value=[fake_result()]))
+    cli.run_mode_menu(record_fault_fn=Mock(return_value=recorded(fake_result())))
 
     output = capsys.readouterr().out
     assert "Query completed:" in output
@@ -566,7 +580,7 @@ def test_the_size_callable_is_not_consulted_before_a_search(monkeypatch):
     )
 
     cli.run_mode_menu(
-        record_fault_fn=Mock(return_value=[]),
+        record_fault_fn=Mock(return_value=recorded()),
         log_size_fn=log_size_fn,
     )
 
@@ -585,7 +599,7 @@ def test_query_metrics_are_logged_in_detail(monkeypatch, tmp_path):
     )
 
     cli.run_mode_menu(
-        record_fault_fn=Mock(return_value=[fake_result()]),
+        record_fault_fn=Mock(return_value=recorded(fake_result())),
         log_size_fn=Mock(return_value=1200),
     )
     shutdown_logging()
@@ -593,7 +607,8 @@ def test_query_metrics_are_logged_in_detail(monkeypatch, tmp_path):
     log_text = log_path.read_text(encoding="utf-8")
     assert re.search(
         r'Satellite fault "disk failure" matched in \d+\.\d ms against '
-        r"1200 historical fault records, returning 1 results\.",
+        r"1200 historical fault records, returning 1 results "
+        r"\(NEW_INCIDENT_STORED\)\.",
         log_text,
     )
 
@@ -611,13 +626,13 @@ def test_optional_metadata_is_shown_only_when_present(monkeypatch, capsys):
 
     cli.run_mode_menu(
         record_fault_fn=Mock(
-            return_value=[
+            return_value=recorded(
                 fake_result(
                     error_code="COM-LINK-LOST",
                     previous_action="Switched to backup transponder",
                     outcome="Link restored",
                 )
-            ]
+            )
         )
     )
 
@@ -633,7 +648,7 @@ def test_absent_metadata_prints_no_empty_labels(monkeypatch, capsys):
         Mock(side_effect=["2", "link lost", "back", "3"]),
     )
 
-    cli.run_mode_menu(record_fault_fn=Mock(return_value=[fake_result()]))
+    cli.run_mode_menu(record_fault_fn=Mock(return_value=recorded(fake_result())))
 
     output = capsys.readouterr().out
     assert "Error code:" not in output
@@ -642,7 +657,7 @@ def test_absent_metadata_prints_no_empty_labels(monkeypatch, capsys):
 
 
 def test_back_is_never_recorded_as_a_fault(monkeypatch):
-    record_fault = Mock(return_value=[])
+    record_fault = Mock(return_value=recorded())
     monkeypatch.setattr(
         "builtins.input",
         Mock(side_effect=["2", "back", "3"]),
@@ -655,7 +670,7 @@ def test_back_is_never_recorded_as_a_fault(monkeypatch):
 
 @pytest.mark.parametrize("blank", ["", "   ", "	"])
 def test_an_empty_message_is_never_recorded(monkeypatch, capsys, blank):
-    record_fault = Mock(return_value=[])
+    record_fault = Mock(return_value=recorded())
     monkeypatch.setattr(
         "builtins.input",
         Mock(side_effect=["2", blank, "back", "3"]),
@@ -668,7 +683,7 @@ def test_an_empty_message_is_never_recorded(monkeypatch, capsys, blank):
 
 
 def test_an_empty_message_does_not_end_the_mode(monkeypatch):
-    record_fault = Mock(return_value=[])
+    record_fault = Mock(return_value=recorded())
     monkeypatch.setattr(
         "builtins.input",
         Mock(side_effect=["2", "   ", "real fault", "back", "3"]),
@@ -688,7 +703,7 @@ def test_the_history_size_is_read_before_the_fault_is_stored(
 
     def record(message):
         history[0] += 1
-        return []
+        return recorded()
 
     monkeypatch.setattr(
         "builtins.input",
@@ -710,7 +725,7 @@ def test_the_mode_announces_that_it_records(monkeypatch, capsys):
         Mock(side_effect=["2", "back", "3"]),
     )
 
-    cli.run_mode_menu(record_fault_fn=Mock(return_value=[]))
+    cli.run_mode_menu(record_fault_fn=Mock(return_value=recorded()))
 
     assert (
         "Each message entered is recorded as a new satellite fault."
@@ -731,7 +746,7 @@ def test_filtered_out_results_show_no_fake_top_section(monkeypatch, capsys):
     )
 
     cli.run_mode_menu(
-        record_fault_fn=Mock(return_value=[]),
+        record_fault_fn=Mock(return_value=recorded()),
         log_size_fn=Mock(return_value=1200),
     )
 
@@ -752,7 +767,7 @@ def test_a_partial_result_set_is_displayed_honestly(monkeypatch, capsys):
     )
 
     cli.run_mode_menu(
-        record_fault_fn=Mock(return_value=results),
+        record_fault_fn=Mock(return_value=recorded(*results)),
         log_size_fn=Mock(return_value=1200),
     )
 
@@ -763,7 +778,7 @@ def test_a_partial_result_set_is_displayed_honestly(monkeypatch, capsys):
 
 
 def test_each_message_is_recorded_in_order(monkeypatch):
-    record_fault = Mock(return_value=[])
+    record_fault = Mock(return_value=recorded())
     monkeypatch.setattr(
         "builtins.input",
         Mock(
@@ -784,7 +799,7 @@ def test_successive_entries_report_the_growing_history(monkeypatch, capsys):
 
     def record(message):
         history[0] += 1
-        return []
+        return recorded()
 
     monkeypatch.setattr(
         "builtins.input",
@@ -802,3 +817,140 @@ def test_successive_entries_report_the_growing_history(monkeypatch, capsys):
     assert "  Historical faults searched: 16" in output
     assert "  Historical faults searched: 17" in output
     assert history[0] == 18
+
+
+# ----------------------------------------------------------------------
+# Bounded storage feedback
+# ----------------------------------------------------------------------
+
+
+def status(incidents=16, max_incidents=100000):
+    return Mock(
+        return_value={"incidents": incidents, "max_incidents": max_incidents}
+    )
+
+
+def test_the_memory_usage_line_is_printed(monkeypatch, capsys):
+    monkeypatch.setattr(
+        "builtins.input",
+        Mock(side_effect=["2", "link lost", "back", "3"]),
+    )
+
+    cli.run_mode_menu(
+        record_fault_fn=Mock(return_value=recorded(fake_result())),
+        storage_status_fn=status(),
+    )
+
+    assert "Fault memory: 16 / 100000 incidents" in capsys.readouterr().out
+
+
+def test_the_memory_line_is_omitted_when_unavailable(monkeypatch, capsys):
+    monkeypatch.setattr(
+        "builtins.input",
+        Mock(side_effect=["2", "link lost", "back", "3"]),
+    )
+
+    cli.run_mode_menu(record_fault_fn=Mock(return_value=recorded()))
+
+    assert "Fault memory:" not in capsys.readouterr().out
+
+
+def test_a_fault_that_was_not_persisted_is_reported(monkeypatch, capsys):
+    monkeypatch.setattr(
+        "builtins.input",
+        Mock(side_effect=["2", "link lost", "back", "3"]),
+    )
+
+    cli.run_mode_menu(
+        record_fault_fn=Mock(
+            return_value=recorded(
+                fake_result(),
+                stored=False,
+                incident_id=None,
+                reason="NOT_STORED_CAPACITY",
+            )
+        ),
+        storage_status_fn=status(incidents=5, max_incidents=5),
+    )
+
+    output = capsys.readouterr().out
+    assert (
+        "Fault was analyzed but not persisted: memory capacity reserved "
+        "for critical incidents." in output
+    )
+    # The operator still gets the analysis they asked for.
+    assert "Top 1 similar historical faults:" in output
+
+
+def test_an_eviction_is_reported(monkeypatch, capsys):
+    monkeypatch.setattr(
+        "builtins.input",
+        Mock(side_effect=["2", "link lost", "back", "3"]),
+    )
+
+    cli.run_mode_menu(
+        record_fault_fn=Mock(
+            return_value=recorded(
+                evicted_incident_id=4,
+                reason="EVICTED_AND_STORED",
+            )
+        ),
+        storage_status_fn=status(incidents=5, max_incidents=5),
+    )
+
+    output = capsys.readouterr().out
+    assert (
+        "Fault memory full: one lower-priority historical incident was "
+        "evicted." in output
+    )
+
+
+def test_a_normal_store_reports_neither_warning(monkeypatch, capsys):
+    monkeypatch.setattr(
+        "builtins.input",
+        Mock(side_effect=["2", "link lost", "back", "3"]),
+    )
+
+    cli.run_mode_menu(
+        record_fault_fn=Mock(return_value=recorded(fake_result())),
+        storage_status_fn=status(),
+    )
+
+    output = capsys.readouterr().out
+    assert "not persisted" not in output
+    assert "was evicted" not in output
+    assert "Fault memory: 16 / 100000 incidents" in output
+
+
+def test_retention_internals_are_never_dumped(monkeypatch, capsys):
+    """The mode stays readable: no policy internals per query."""
+    monkeypatch.setattr(
+        "builtins.input",
+        Mock(side_effect=["2", "link lost", "back", "3"]),
+    )
+
+    cli.run_mode_menu(
+        record_fault_fn=Mock(return_value=recorded(fake_result())),
+        storage_status_fn=status(),
+    )
+
+    output = capsys.readouterr().out
+    assert "retention" not in output.lower()
+    assert "NEW_INCIDENT_STORED" not in output
+    assert "critical_reserved_slots" not in output
+
+
+def test_storage_feedback_is_skipped_for_back_and_blank(monkeypatch, capsys):
+    storage_status_fn = status()
+    monkeypatch.setattr(
+        "builtins.input",
+        Mock(side_effect=["2", "   ", "back", "3"]),
+    )
+
+    cli.run_mode_menu(
+        record_fault_fn=Mock(return_value=recorded()),
+        storage_status_fn=storage_status_fn,
+    )
+
+    storage_status_fn.assert_not_called()
+    assert "Fault memory:" not in capsys.readouterr().out

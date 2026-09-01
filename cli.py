@@ -47,7 +47,11 @@ def _run_regular_mode() -> bool:
     return main()
 
 
-def _run_log_search_mode(record_fault_fn, log_size_fn=None) -> bool:
+def _run_log_search_mode(
+    record_fault_fn,
+    log_size_fn=None,
+    storage_status_fn=None,
+) -> bool:
     """Record incoming faults until the user leaves the mode.
 
     Every message entered here is treated as a REAL satellite fault: it
@@ -89,7 +93,12 @@ def _run_log_search_mode(record_fault_fn, log_size_fn=None) -> bool:
             print()
             continue
 
-        _record_and_report_fault(query, record_fault_fn, log_size_fn)
+        _record_and_report_fault(
+            query,
+            record_fault_fn,
+            log_size_fn,
+            storage_status_fn,
+        )
 
 
 def _format_log_message(message: str) -> list[str]:
@@ -152,7 +161,40 @@ def _print_query_metrics(elapsed_ms, searched, returned) -> None:
     print()
 
 
-def _record_and_report_fault(message, record_fault_fn, log_size_fn=None) -> None:
+def _print_storage_note(result, storage_status_fn) -> None:
+    """Print at most two short lines about what storage did.
+
+    Retention internals stay out of the way; an operator only needs to
+    know whether the fault was kept and roughly how full memory is.
+    """
+    if not result.stored:
+        print(
+            "Fault was analyzed but not persisted: memory capacity "
+            "reserved for critical incidents."
+        )
+
+    if result.evicted_incident_id is not None:
+        print(
+            "Fault memory full: one lower-priority historical incident "
+            "was evicted."
+        )
+
+    if storage_status_fn is not None:
+        status = storage_status_fn()
+        print(
+            f"Fault memory: {status['incidents']} / "
+            f"{status['max_incidents']} incidents"
+        )
+
+    print()
+
+
+def _record_and_report_fault(
+    message,
+    record_fault_fn,
+    log_size_fn=None,
+    storage_status_fn=None,
+) -> None:
     """Record one incoming fault and print the incidents it resembles.
 
     The history size is read BEFORE recording, so the reported figure is
@@ -167,21 +209,23 @@ def _record_and_report_fault(message, record_fault_fn, log_size_fn=None) -> None
     started = time.perf_counter()
 
     try:
-        results = record_fault_fn(message)
+        outcome = record_fault_fn(message)
     except Exception:
         LOGGER.error("Semantic log search failed.")
         print("Semantic Log Search is temporarily unavailable.")
         return
 
     elapsed_ms = (time.perf_counter() - started) * 1000
+    results = outcome.matches
 
     LOGGER.info(
         "Satellite fault %s matched in %.1f ms against %s historical "
-        "fault records, returning %d results.",
+        "fault records, returning %d results (%s).",
         json.dumps(message, ensure_ascii=False),
         elapsed_ms,
         "an unknown number of" if searched is None else searched,
         len(results),
+        outcome.reason,
     )
 
     if not results:
@@ -194,10 +238,16 @@ def _record_and_report_fault(message, record_fault_fn, log_size_fn=None) -> None
         for position, match in enumerate(results, start=1):
             _print_incident(position, match)
 
+    _print_storage_note(outcome, storage_status_fn)
     _print_query_metrics(elapsed_ms, searched, len(results))
 
 
-def run_mode_menu(*, record_fault_fn=None, log_size_fn=None) -> None:
+def run_mode_menu(
+    *,
+    record_fault_fn=None,
+    log_size_fn=None,
+    storage_status_fn=None,
+) -> None:
     """Run the mode menu with an optional injected fault recorder.
 
     ``record_fault_fn`` is called as ``record_fault_fn(message)``.  It
@@ -221,7 +271,11 @@ def run_mode_menu(*, record_fault_fn=None, log_size_fn=None) -> None:
                 continue
 
             if choice == "2":
-                if not _run_log_search_mode(record_fault_fn, log_size_fn):
+                if not _run_log_search_mode(
+                    record_fault_fn,
+                    log_size_fn,
+                    storage_status_fn,
+                ):
                     return
 
                 continue

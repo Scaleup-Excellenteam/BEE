@@ -128,6 +128,7 @@ def main() -> None:
                 run_cli(
                     record_fault_fn=log_search.record_error,
                     log_size_fn=lambda: len(log_search),
+                    storage_status_fn=log_search.storage_status,
                 )
             finally:
                 log_search.close()

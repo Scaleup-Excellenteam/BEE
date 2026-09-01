@@ -50,6 +50,8 @@ it directly.
 
 from __future__ import annotations
 
+import os
+import shutil
 from datetime import datetime
 from itertools import batched
 from pathlib import Path
@@ -70,6 +72,7 @@ from src.logsearch.incident_history import (
 )
 from src.logsearch.incidents import (
     DEDUP_SIMILARITY_THRESHOLD,
+    RecordFaultResult,
     DEFAULT_SEVERITY,
     DEFAULT_SUBSYSTEM,
     FaultIncident,
@@ -77,6 +80,16 @@ from src.logsearch.incidents import (
     SEVERITIES,
     find_duplicate,
     normalize_subsystem,
+)
+from src.logsearch.retention import (
+    CRITICAL,
+    CRITICAL_RESERVE_RATIO,
+    DEFAULT_MAX_INCIDENTS,
+    DUPLICATE_UPDATED,
+    NOT_STORED_CAPACITY,
+    critical_reserved_slots,
+    plan_admission,
+    select_within_capacity,
 )
 from src.logsearch.log_parser import parse_fault_records
 
@@ -130,6 +143,8 @@ class LogSearchService:
         batch_size: int = DEFAULT_BATCH_SIZE,
         min_similarity: float = MIN_LOG_SIMILARITY,
         dedup_threshold: float = DEDUP_SIMILARITY_THRESHOLD,
+        max_incidents: int = DEFAULT_MAX_INCIDENTS,
+        critical_reserve_ratio: float = CRITICAL_RESERVE_RATIO,
         warm_up_fn=warm_up,
         now_fn=None,
     ):
@@ -144,12 +159,23 @@ class LogSearchService:
         self.batch_size = batch_size
         self.min_similarity = min_similarity
         self.dedup_threshold = dedup_threshold
+        self.max_incidents = max_incidents
+        self.critical_reserve_ratio = critical_reserve_ratio
         self.warm_up_fn = warm_up_fn
         self.now_fn = now_fn or (
             lambda: datetime.now().strftime(TIMESTAMP_FORMAT)
         )
 
         self.incidents: list[FaultIncident] = self.history.load()
+        self._by_id: dict[int, FaultIncident] = {}
+        self._reindex()
+        self._next_incident_id = self.history.next_incident_id(self.incidents)
+
+        # Set when an upgrade is in progress: an older version's cache is
+        # on disk, and a legacy history may still need converting.
+        self.migrated_from_legacy = False
+        self._legacy_cache = False
+
         self._store: EmbeddingStore | None = None
         self._open_store()
 
@@ -167,29 +193,108 @@ class LogSearchService:
             self._store = EmbeddingStore(self.cache_path)
             self._verify_cache_matches_history()
 
+            if self._legacy_cache:
+                # Written by an older version, so it cannot be searched.
+                # It is retired during refresh, once the canonical
+                # history it will be rebuilt from is safely on disk.
+                self._close_store()
+
+    def _legacy_cache_sources(self) -> set[str]:
+        """Return cache source names an older version of this code wrote.
+
+        Only the configured legacy log counts.  A cache belonging to some
+        entirely different corpus is still refused.
+        """
+        if self.legacy_log_path is None:
+            return set()
+
+        return {self.legacy_log_path.name}
+
     def _verify_cache_matches_history(self) -> None:
         """Refuse a cache that does not belong to this history.
 
         Silently reusing the wrong cache would answer satellite queries
         out of some other corpus, which is worse than failing loudly.
+
+        A cache this project wrote under its previous layout is the one
+        exception: upgrading must not require the operator to delete
+        files by hand, so it is flagged for rebuilding instead.
         """
         if self._store is None or len(self._store) == 0:
             return
 
         stored_source = self._store.metadata(0)["source_text"]
 
-        if stored_source != CACHE_SOURCE_NAME:
-            raise CacheError(
-                f"The cache at {self.cache_path} was built from "
-                f"{stored_source}, not {CACHE_SOURCE_NAME}; delete it or "
-                "point at the right one"
-            )
+        if stored_source == CACHE_SOURCE_NAME:
+            return
 
-        if len(self._store) > len(self.incidents):
+        if stored_source in self._legacy_cache_sources():
+            self._legacy_cache = True
+            return
+
+        raise CacheError(
+            f"The cache at {self.cache_path} was built from "
+            f"{stored_source}, not {CACHE_SOURCE_NAME}; delete it or "
+            "point at the right one"
+        )
+
+    def _discard_retired_cache(self) -> None:
+        """Remove a cache retired during an upgrade.
+
+        Only ever called once the replacement has been built AND
+        validated, so until that point the old vectors stay on disk as a
+        recovery option.
+        """
+        shutil.rmtree(f"{self.cache_path}.legacy", ignore_errors=True)
+
+    def _retire_legacy_cache(self) -> None:
+        """Set aside an older version's cache so a new one can be built.
+
+        Called ONLY after the canonical incident history has been
+        written, so the vectors being discarded are already reproducible.
+        The directory is renamed rather than deleted, and removed only
+        once the replacement has been built and validated.
+        """
+        self._close_store()
+
+        retired = f"{self.cache_path}.legacy"
+        shutil.rmtree(retired, ignore_errors=True)
+
+        if os.path.isdir(self.cache_path):
+            os.rename(self.cache_path, retired)
+
+        self._legacy_cache = False
+
+    def _cache_is_a_prefix(self) -> bool:
+        """Return whether the cache still lines up with the history.
+
+        Incident ``n`` must hold vector ``n``.  A cache that is longer
+        than the history, or whose last vector belongs to a different
+        incident, is stale -- normally because a compaction was
+        interrupted.  It is not an error: the history is canonical, so
+        the cache is simply rebuilt from it.
+        """
+        if self._store is None or len(self._store) == 0:
+            return True
+
+        indexed = len(self._store)
+
+        if indexed > len(self.incidents):
+            return False
+
+        return (
+            self._store.metadata(indexed - 1)["offset"]
+            == self.incidents[indexed - 1].incident_id
+        )
+
+    def _validate_alignment(self) -> None:
+        """Fail loudly if the cache and the history disagree in size."""
+        indexed = self._indexed_count()
+
+        if indexed != len(self.incidents):
             raise CacheError(
-                f"The cache at {self.cache_path} holds {len(self._store)} "
-                f"vectors but the history has only {len(self.incidents)} "
-                "incidents; the history was truncated or replaced"
+                f"The cache at {self.cache_path} holds {indexed} vectors "
+                f"for {len(self.incidents)} incidents"
             )
 
     def _close_store(self) -> None:
@@ -234,6 +339,53 @@ class LogSearchService:
 
         return None
 
+    def _incidents_from_records(self, records) -> list[FaultIncident]:
+        """Convert parsed log records into structured incidents.
+
+        Log lines carry no structure, so they convert with honest
+        defaults: the parsed level becomes the severity, the parsed
+        timestamp becomes both first and last seen, and the subsystem is
+        UNKNOWN rather than guessed.  Nothing is invented -- no error
+        codes, no actions, no outcomes.
+
+        Repeats are folded together ONLY when the message and severity
+        are character-for-character identical.  That is a fact about the
+        text, not a similarity judgement, so it cannot merge two
+        different faults; the semantic 0.90 rule is deliberately not used
+        here, because a migration that quietly loses a distinct fault is
+        unrecoverable.  A folded incident keeps every occurrence:
+
+            count      how many times the line appears
+            first_seen the earliest occurrence
+            last_seen  the latest occurrence
+        """
+        incidents: dict[tuple[str, str], FaultIncident] = {}
+
+        for record in records:
+            key = (record.message, record.level)
+            known = incidents.get(key)
+
+            if known is None:
+                incidents[key] = FaultIncident(
+                    incident_id=len(incidents) + 1,
+                    message=record.message,
+                    subsystem=DEFAULT_SUBSYSTEM,
+                    severity=record.level,
+                    error_code=None,
+                    first_seen=record.timestamp,
+                    last_seen=record.timestamp,
+                    count=1,
+                    source_text=record.source_text,
+                    source_offset=record.offset,
+                )
+                continue
+
+            known.count += 1
+            known.first_seen = min(known.first_seen, record.timestamp)
+            known.last_seen = max(known.last_seen, record.timestamp)
+
+        return list(incidents.values())
+
     def bootstrap(self) -> int:
         """Build the incident history once, from the prepared dataset.
 
@@ -255,23 +407,23 @@ class LogSearchService:
 
         records = parse_fault_records(source)
 
-        self.incidents = [
-            FaultIncident(
-                incident_id=position,
-                message=record.message,
-                subsystem=DEFAULT_SUBSYSTEM,
-                severity=record.level,
-                error_code=None,
-                first_seen=record.timestamp,
-                last_seen=record.timestamp,
-                count=1,
-                source_text=record.source_text,
-                source_offset=record.offset,
-            )
-            for position, record in enumerate(records, start=1)
-        ]
+        parsed = self._incidents_from_records(records)
+        self.migrated_from_legacy = source == self.legacy_log_path
 
-        self.history.save(self.incidents)
+        # A prepared dataset larger than the configured budget is trimmed
+        # by the same retention rules used at runtime, rather than
+        # overflowing the memory it is supposed to fit in.
+        self.incidents = select_within_capacity(
+            parsed,
+            self.max_incidents,
+            self.critical_reserve_ratio,
+        )
+
+        # Ids come from the dataset order, so trimming leaves gaps and
+        # the counter continues past every id ever issued.
+        self._reindex()
+        self._next_incident_id = len(parsed) + 1
+        self.history.save(self.incidents, self._next_incident_id)
 
         return len(self.incidents)
 
@@ -279,21 +431,38 @@ class LogSearchService:
         """Return how many incidents already have an embedding."""
         return len(self._store) if self._store is not None else 0
 
-    def _index(self, incidents: list[FaultIncident]) -> None:
+    def _index(
+        self,
+        incidents: list[FaultIncident],
+        vectors: list[list[float]] | None = None,
+    ) -> None:
         """Embed incidents and append them to the cache.
 
-        The caller is responsible for having closed the store first.
+        ``vectors`` lets a caller hand over embeddings it has already
+        computed, so nothing is embedded twice.  The caller is
+        responsible for having closed the store first.
         """
         if not incidents:
             return
 
+        precomputed = (
+            None
+            if vectors is None
+            else dict(zip((one.incident_id for one in incidents), vectors))
+        )
         writer = None
 
         try:
             for batch in batched(incidents, self.batch_size):
-                vectors = self.batch_embedder(
-                    [incident.message for incident in batch]
-                )
+                if precomputed is None:
+                    vectors = self.batch_embedder(
+                        [incident.message for incident in batch]
+                    )
+                else:
+                    vectors = [
+                        precomputed[incident.incident_id]
+                        for incident in batch
+                    ]
                 items = [
                     EmbeddedSentence(
                         sentence=incident.message,
@@ -327,6 +496,16 @@ class LogSearchService:
         """
         self.bootstrap()
 
+        # Ordering matters.  The canonical history has just been written,
+        # so every vector about to be discarded is now reproducible from
+        # it.  Retiring the old cache any earlier would risk losing the
+        # embeddings with nothing to rebuild them from.
+        if self._legacy_cache:
+            self._retire_legacy_cache()
+
+        if not self._cache_is_a_prefix():
+            return self._rebuild_cache()
+
         pending = self.incidents[self._indexed_count():]
 
         if not pending:
@@ -335,8 +514,103 @@ class LogSearchService:
         self._close_store()
         self._index(pending)
         self._open_store()
+        self._validate_alignment()
+        self._discard_retired_cache()
 
         return len(pending)
+
+    def _rebuild_cache(self) -> int:
+        """Throw the cache away and re-embed every incident.
+
+        The history is the source of truth, so this always recovers, at
+        the cost of embedding everything again.  It runs only when the
+        cache cannot be trusted, never on a normal start.
+        """
+        self._close_store()
+        shutil.rmtree(self.cache_path, ignore_errors=True)
+        self._index(self.incidents)
+        self._open_store()
+        self._validate_alignment()
+
+        self._discard_retired_cache()
+
+        return len(self.incidents)
+
+    def _compact_cache(
+        self,
+        previous_incidents: list[FaultIncident],
+        final_incidents: list[FaultIncident],
+        fresh_vectors: dict[int, list[float]],
+    ) -> None:
+        """Rewrite the cache to hold exactly the surviving incidents.
+
+        Vectors that already exist are COPIED out of the current cache
+        rather than recomputed, so evicting one incident costs no
+        embeddings at all beyond the newcomer's own.  ``fresh_vectors``
+        supplies the vectors the cache does not have yet.
+
+        The new cache is built beside the old one and swapped in only
+        once it is complete, so an interruption leaves either the old
+        cache or a rebuildable gap, never a half-written index.
+        """
+        position_of = {
+            incident.incident_id: index
+            for index, incident in enumerate(previous_incidents)
+        }
+        existing = self._store.vectors() if self._store is not None else None
+
+        def vector_for(incident: FaultIncident) -> list[float]:
+            if incident.incident_id in fresh_vectors:
+                return fresh_vectors[incident.incident_id]
+
+            return existing[position_of[incident.incident_id]].tolist()
+
+        staging = f"{self.cache_path}.rebuild"
+        shutil.rmtree(staging, ignore_errors=True)
+
+        writer = None
+
+        try:
+            for batch in batched(final_incidents, self.batch_size):
+                items = [
+                    EmbeddedSentence(
+                        sentence=incident.message,
+                        source_text=CACHE_SOURCE_NAME,
+                        offset=incident.incident_id,
+                        embedding=vector_for(incident),
+                    )
+                    for incident in batch
+                ]
+
+                if writer is None:
+                    writer = EmbeddingStoreWriter(
+                        staging,
+                        dim=len(items[0].embedding),
+                    )
+
+                writer.append(items)
+
+            if writer is not None:
+                writer.finish()
+        finally:
+            if writer is not None:
+                writer.close()
+
+        # The memory map must be released before the directory moves.
+        self._close_store()
+
+        backup = f"{self.cache_path}.old"
+        shutil.rmtree(backup, ignore_errors=True)
+
+        if os.path.isdir(self.cache_path):
+            os.rename(self.cache_path, backup)
+
+        if os.path.isdir(staging):
+            os.rename(staging, self.cache_path)
+
+        shutil.rmtree(backup, ignore_errors=True)
+
+        self._open_store()
 
     def warm_up(self) -> None:
         """Load the embedding model now rather than on the first query.
@@ -350,12 +624,20 @@ class LogSearchService:
     # Searching
     # ------------------------------------------------------------------
 
+    def _reindex(self) -> None:
+        """Rebuild the id lookup after the incident list changes.
+
+        Ids are NOT positions.  Eviction leaves gaps -- a history of
+        incidents 2 and 7 is perfectly normal -- so looking one up by
+        subscript would return the wrong incident, or none at all.
+        """
+        self._by_id = {
+            incident.incident_id: incident for incident in self.incidents
+        }
+
     def _incident_by_id(self, incident_id: int) -> FaultIncident | None:
         """Return the incident with this id, if the history still has it."""
-        if 1 <= incident_id <= len(self.incidents):
-            return self.incidents[incident_id - 1]
-
-        return None
+        return self._by_id.get(incident_id)
 
     def _rank(self, text: str, k: int) -> list[IncidentMatch]:
         """Return the ``k`` most similar incidents, unfiltered.
@@ -412,14 +694,20 @@ class LogSearchService:
         previous_action: str | None = None,
         outcome: str | None = None,
         k: int = 5,
-    ) -> list[IncidentMatch]:
-        """Match a new fault against history, then record it.
+    ) -> RecordFaultResult:
+        """Match a new fault against history, then try to record it.
 
-        Returns the Top ``k`` similar PREVIOUS incidents.  The new fault
-        is stored only afterwards, so it is never matched against
-        itself.  If it turns out to be a repeat of a known incident, that
-        incident's count and ``last_seen`` are updated and NO new
-        embedding is produced.
+        The result carries the Top ``k`` similar PREVIOUS incidents plus
+        what became of this one in storage.  The search always happens
+        first, so the fault is never matched against itself AND an
+        operator still gets their answer even when the fault cannot be
+        persisted.
+
+        A repeat updates the known incident's count and ``last_seen`` and
+        produces no embedding.  A genuinely new fault is stored if the
+        retention policy allows, possibly displacing a less valuable
+        incident; if it does not allow, the search result is still
+        returned and ``stored`` is False.
         """
         if severity not in SEVERITIES:
             raise ValueError(
@@ -443,7 +731,7 @@ class LogSearchService:
 
         timestamp = self.now_fn()
         candidate = FaultIncident(
-            incident_id=len(self.incidents) + 1,
+            incident_id=self._next_incident_id,
             message=error_text,
             subsystem=subsystem,
             severity=severity,
@@ -454,7 +742,7 @@ class LogSearchService:
             previous_action=previous_action,
             outcome=outcome,
             source_text=self.history.path.name,
-            source_offset=len(self.incidents) + 1,
+            source_offset=self._next_incident_id,
         )
 
         duplicate = find_duplicate(
@@ -468,19 +756,108 @@ class LogSearchService:
         )
 
         if duplicate is not None:
-            # A repeat costs one metadata update and no embedding at all.
+            # A repeat costs one metadata update, no slot and no
+            # embedding, so it is unaffected by capacity.
             duplicate.record_recurrence(timestamp)
-            self.history.save(self.incidents)
-            return results
+            self.history.save(self.incidents, self._next_incident_id)
 
-        self.incidents.append(candidate)
-        self.history.save(self.incidents)
+            return RecordFaultResult(
+                matches=results,
+                stored=True,
+                deduplicated=True,
+                incident_id=duplicate.incident_id,
+                evicted_incident_id=None,
+                reason=DUPLICATE_UPDATED,
+            )
 
-        self._close_store()
-        self._index([candidate])
-        self._open_store()
+        plan = plan_admission(
+            candidate,
+            self.incidents,
+            self.max_incidents,
+            self.critical_reserve_ratio,
+        )
 
-        return results
+        if not plan.store:
+            # The fault was analysed and answered; it just is not worth a
+            # slot compared with what memory already holds.
+            return RecordFaultResult(
+                matches=results,
+                stored=False,
+                deduplicated=False,
+                incident_id=None,
+                evicted_incident_id=None,
+                reason=plan.reason,
+            )
+
+        vector = self.batch_embedder([candidate.message])[0]
+        previous_incidents = list(self.incidents)
+        self._next_incident_id = candidate.incident_id + 1
+
+        if plan.evict is None:
+            self.incidents.append(candidate)
+            self._reindex()
+            self.history.save(self.incidents, self._next_incident_id)
+
+            self._close_store()
+            self._index([candidate], vectors=[vector])
+            self._open_store()
+            evicted_id = None
+        else:
+            self.incidents = [
+                incident
+                for incident in previous_incidents
+                if incident.incident_id != plan.evict.incident_id
+            ] + [candidate]
+            self._reindex()
+
+            # Canonical history is written FIRST: if the cache rewrite
+            # below is interrupted, the truth is already correct and the
+            # cache is rebuilt on the next start.
+            self.history.save(self.incidents, self._next_incident_id)
+            self._compact_cache(
+                previous_incidents,
+                self.incidents,
+                {candidate.incident_id: vector},
+            )
+            evicted_id = plan.evict.incident_id
+
+        self._validate_alignment()
+
+        return RecordFaultResult(
+            matches=results,
+            stored=True,
+            deduplicated=False,
+            incident_id=candidate.incident_id,
+            evicted_incident_id=evicted_id,
+            reason=plan.reason,
+        )
+
+    def storage_status(self) -> dict:
+        """Return the configured semantic-memory budget and its usage.
+
+        This is the memory budget the mission configured, not anything
+        about the physical disk.
+        """
+        total = len(self.incidents)
+        critical = sum(
+            1 for incident in self.incidents if incident.severity == CRITICAL
+        )
+
+        return {
+            "incidents": total,
+            "max_incidents": self.max_incidents,
+            "usage_percent": (
+                round(total / self.max_incidents * 100, 1)
+                if self.max_incidents
+                else 0.0
+            ),
+            "critical_incidents": critical,
+            "noncritical_incidents": total - critical,
+            "critical_reserved_slots": critical_reserved_slots(
+                self.max_incidents,
+                self.critical_reserve_ratio,
+            ),
+        }
 
 
 _default_service: LogSearchService | None = None
@@ -510,8 +887,8 @@ def record_error(
     previous_action: str | None = None,
     outcome: str | None = None,
     k: int = 5,
-) -> list[IncidentMatch]:
-    """Match a new fault against history, then record it."""
+) -> RecordFaultResult:
+    """Match a new fault against history, then try to record it."""
     return get_default_service().record_error(
         error_text,
         severity=severity,

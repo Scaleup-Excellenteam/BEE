@@ -262,10 +262,11 @@ def test_a_fault_is_searched_before_it_is_recorded(make_service):
     service = ready(make_service)
 
     text = "Propulsion valve stuck open unexpectedly"
-    results = service.record_error(text, subsystem="UNKNOWN")
+    outcome = service.record_error(text, subsystem="UNKNOWN")
 
     # The fault itself was not in the history when the search ran.
-    assert all(match.message != text for match in results)
+    assert all(match.message != text for match in outcome.matches)
+    assert outcome.stored is True
     assert len(service) == 4
 
 
@@ -274,12 +275,13 @@ def test_a_repeat_still_only_sees_earlier_incidents(make_service):
     service = ready(make_service)
     service.record_error("Solar array degraded", subsystem="POWER")
 
-    results = service.record_error("Solar array degraded", subsystem="POWER")
+    outcome = service.record_error("Solar array degraded", subsystem="POWER")
 
     assert len(service) == 4
+    assert outcome.deduplicated is True
     assert service.incidents[-1].count == 2
     # The one it merged into is a PREVIOUS incident, ranked normally.
-    assert all(match.incident.incident_id <= 4 for match in results)
+    assert all(match.incident.incident_id <= 4 for match in outcome.matches)
 
 
 def test_a_blank_fault_is_refused(make_service):
@@ -612,7 +614,8 @@ def test_a_cache_from_another_source_is_rejected(make_service, tmp_path):
         build()
 
 
-def test_a_cache_longer_than_the_history_is_rejected(make_service):
+def test_a_cache_longer_than_the_history_is_rebuilt(make_service):
+    """The history is canonical, so a stale cache recovers, not fails."""
     build, incidents_path, _, _ = make_service
     ready(make_service).close()
 
@@ -620,8 +623,11 @@ def test_a_cache_longer_than_the_history_is_rejected(make_service):
     lines = incidents_path.read_text(encoding="utf-8").splitlines()
     incidents_path.write_text(lines[0] + "\n", encoding="utf-8")
 
-    with pytest.raises(CacheError, match="truncated or replaced"):
-        build()
+    recovered = build()
+
+    assert recovered.refresh() == 1
+    assert len(recovered) == 1
+    assert len(recovered._store) == 1
 
 
 # ----------------------------------------------------------------------

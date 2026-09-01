@@ -184,6 +184,22 @@ class IncidentMatch:
         return self.incident.source_offset
 
 
+@dataclass
+class RecordFaultResult:
+    """What a reported fault matched, and what became of it in storage.
+
+    Callers get the storage outcome as data rather than having to read
+    printed text or infer it from a length.
+    """
+
+    matches: list[IncidentMatch]
+    stored: bool
+    deduplicated: bool
+    incident_id: int | None
+    evicted_incident_id: int | None
+    reason: str
+
+
 def normalize_subsystem(subsystem: str | None) -> str:
     """Return a valid subsystem name, defaulting to UNKNOWN."""
     if subsystem is None or not str(subsystem).strip():
