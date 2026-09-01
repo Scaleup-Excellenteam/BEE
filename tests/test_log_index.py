@@ -11,6 +11,7 @@ from unittest.mock import Mock
 
 import pytest
 
+from src.logsearch import log_index
 from src.logsearch.log_index import LogSearchService
 from src.semantic.contracts import SemanticResult
 
@@ -43,7 +44,7 @@ def stub_batch_embedder(texts):
 @pytest.fixture
 def log_path(tmp_path):
     """Write the sample history to a log file and return its path."""
-    path = tmp_path / "logs" / "autocomplete.log"
+    path = tmp_path / "logs" / "satellite_faults.log"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(HISTORY, encoding="utf-8")
 
@@ -58,7 +59,10 @@ def make_service(tmp_path, log_path):
     def build(batch_embedder=None, embedder=None):
         service = LogSearchService(
             log_path=str(log_path),
-            cache_path=str(tmp_path / "log_embedding_cache"),
+            cache_path=str(tmp_path / "satellite_fault_cache"),
+            # No prepared dataset here: these tests supply their own
+            # history, so bootstrapping must stay out of the way.
+            dataset_path=str(tmp_path / "absent_dataset.log"),
             embedder=embedder or stub_embedder,
             batch_embedder=batch_embedder or stub_batch_embedder,
         )
@@ -96,6 +100,9 @@ def test_only_fault_levels_are_indexed(make_service):
     service = make_service()
     service.refresh()
 
+    # This enumerates what is stored rather than testing ranking, so the
+    # similarity threshold is dropped for the duration.
+    service.min_similarity = 0.0
     indexed = [result.sentence for result in service.search_similar_logs("x", k=10)]
 
     assert sorted(indexed) == sorted(
@@ -117,7 +124,7 @@ def test_the_original_message_source_and_offset_are_preserved(make_service):
     results = service.search_similar_logs("Database connection refused.", k=1)
 
     assert results[0].sentence == "Database connection refused."
-    assert results[0].source_text == "autocomplete.log"
+    assert results[0].source_text == "satellite_faults.log"
     assert results[0].offset == 2
 
 
@@ -415,3 +422,167 @@ def test_part_a_autocomplete_is_untouched_by_the_log_engine():
             score=10,
         )
     ]
+
+
+# ----------------------------------------------------------------------
+# Minimum similarity threshold
+# ----------------------------------------------------------------------
+
+
+def ranked(*similarities):
+    """Return fabricated results ordered best first, as search returns."""
+    return [
+        SemanticResult(
+            sentence=f"Historical fault {position}",
+            source_text="autocomplete.log",
+            offset=position + 1,
+            similarity=similarity,
+        )
+        for position, similarity in enumerate(similarities)
+    ]
+
+
+@pytest.fixture
+def searching(monkeypatch, make_service):
+    """Return a service whose ranking step is replaced by fixed scores."""
+
+    def build(*similarities):
+        service = make_service()
+        service.refresh()
+        monkeypatch.setattr(
+            log_index,
+            "semantic_search",
+            Mock(return_value=ranked(*similarities)),
+        )
+
+        return service
+
+    return build
+
+
+def test_a_strong_match_is_returned(searching):
+    results = searching(0.80).search_similar_logs("anything")
+
+    assert [result.similarity for result in results] == [0.80]
+
+
+def test_a_result_exactly_on_the_threshold_is_returned(searching):
+    results = searching(0.35).search_similar_logs("anything")
+
+    assert [result.similarity for result in results] == [0.35]
+
+
+def test_a_result_just_below_the_threshold_is_filtered(searching):
+    assert searching(0.349).search_similar_logs("anything") == []
+
+
+def test_results_below_the_threshold_are_all_dropped(searching):
+    assert searching(0.30, 0.20, 0.08).search_similar_logs("anything") == []
+
+
+def test_only_qualifying_results_survive(searching):
+    service = searching(0.81, 0.62, 0.41, 0.20, 0.08)
+
+    results = service.search_similar_logs("anything")
+
+    assert [result.similarity for result in results] == [0.81, 0.62, 0.41]
+
+
+def test_fewer_than_five_results_is_valid(searching):
+    service = searching(0.90, 0.40, 0.10)
+
+    assert len(service.search_similar_logs("anything")) == 2
+
+
+def test_five_strong_results_are_all_returned(searching):
+    service = searching(0.90, 0.80, 0.70, 0.60, 0.50)
+
+    assert len(service.search_similar_logs("anything")) == 5
+
+
+def test_the_order_of_surviving_results_is_untouched(searching):
+    service = searching(0.81, 0.62, 0.41, 0.20)
+
+    results = service.search_similar_logs("anything")
+
+    assert [result.sentence for result in results] == [
+        "Historical fault 0",
+        "Historical fault 1",
+        "Historical fault 2",
+    ]
+
+
+def test_the_threshold_is_configurable(monkeypatch, make_service):
+    service = make_service()
+    service.refresh()
+    service.min_similarity = 0.60
+    monkeypatch.setattr(
+        log_index,
+        "semantic_search",
+        Mock(return_value=ranked(0.81, 0.62, 0.41)),
+    )
+
+    results = service.search_similar_logs("anything")
+
+    assert [result.similarity for result in results] == [0.81, 0.62]
+
+
+def test_the_default_threshold_is_used(make_service):
+    assert make_service().min_similarity == log_index.MIN_LOG_SIMILARITY
+    assert log_index.MIN_LOG_SIMILARITY == 0.35
+
+
+def test_recording_an_error_also_filters_weak_matches(monkeypatch, make_service):
+    service = make_service()
+    service.refresh()
+    monkeypatch.setattr(
+        log_index,
+        "semantic_search",
+        Mock(return_value=ranked(0.90, 0.10)),
+    )
+
+    results = service.record_error("Brand new fault.")
+
+    assert [result.similarity for result in results] == [0.90]
+    assert len(service) == 5
+
+
+# ----------------------------------------------------------------------
+# Model warm-up
+# ----------------------------------------------------------------------
+
+
+def test_warm_up_loads_the_model(make_service):
+    warm_up_fn = Mock()
+    service = LogSearchService(
+        log_path=str(make_service().log_path),
+        cache_path=str(make_service().cache_path),
+        dataset_path=None,
+        embedder=stub_embedder,
+        batch_embedder=stub_batch_embedder,
+        warm_up_fn=warm_up_fn,
+    )
+
+    service.warm_up()
+    service.close()
+
+    warm_up_fn.assert_called_once_with()
+
+
+def test_warm_up_does_not_embed_any_log_text(tmp_path, log_path):
+    batch_embedder = Mock(side_effect=stub_batch_embedder)
+    service = LogSearchService(
+        log_path=str(log_path),
+        cache_path=str(tmp_path / "cache"),
+        dataset_path=str(tmp_path / "absent_dataset.log"),
+        embedder=stub_embedder,
+        batch_embedder=batch_embedder,
+        warm_up_fn=Mock(),
+    )
+
+    service.refresh()
+    embedded_during_refresh = batch_embedder.call_count
+    service.warm_up()
+    service.close()
+
+    assert batch_embedder.call_count == embedded_during_refresh

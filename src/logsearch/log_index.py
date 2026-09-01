@@ -48,12 +48,13 @@ from itertools import batched
 from pathlib import Path
 
 from src.semantic.contracts import EmbeddedSentence, SemanticResult
-from src.semantic.embedding_cache import cache_files
+from src.semantic.embedding_cache import CacheError, cache_files
 from src.semantic.embedding_store import EmbeddingStore, EmbeddingStoreWriter
 from src.semantic.local_provider import (
     DEFAULT_BATCH_SIZE,
     embed_text,
     embed_texts,
+    warm_up,
 )
 from src.semantic.search import semantic_search
 from src.logsearch.log_parser import (
@@ -64,17 +65,33 @@ from src.logsearch.log_parser import (
 )
 
 
-# The log written by src/logging_config.py.
-DEFAULT_LOG_PATH = "logs/autocomplete.log"
+# The satellite's fault history.  This is deliberately NOT
+# logs/autocomplete.log: that file is the application's own runtime
+# diary, and mixing "user submitted a search query" into a satellite
+# fault history would make every search meaningless.
+DEFAULT_LOG_PATH = "logs/satellite_faults.log"
+
+# Faults collected from previous satellites, previous missions and test
+# environments.  Imported into the history once, on the first run.
+BOOTSTRAP_DATASET_PATH = "data/historical_satellite_faults.log"
 
 # Kept apart from the corpus caches on purpose.  Those hold 768 wide
 # Gemini vectors; these are 384 wide local ones, and mixing the two would
 # be rejected by the store anyway.
-DEFAULT_CACHE_PATH = "log_embedding_cache"
+DEFAULT_CACHE_PATH = "satellite_fault_cache"
 
 # Matches the format in src/logging_config.py, so appended lines parse
 # back exactly like the ones logging wrote.
 TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S"
+
+# Cosine similarity a historical fault must reach to count as a match.
+#
+# Ranking alone is not enough: the nearest of a thousand unrelated faults
+# is still unrelated, and showing it as a "similar fault" is worse than
+# showing nothing.  Observed on real data, "hi" scored about 0.08 and
+# "error" about 0.40 against faults that had nothing to do with them, so
+# the line is drawn at 0.35.  Below it, the honest answer is "no match".
+MIN_LOG_SIMILARITY = 0.35
 
 
 class LogSearchService:
@@ -84,15 +101,21 @@ class LogSearchService:
         self,
         log_path: str = DEFAULT_LOG_PATH,
         cache_path: str = DEFAULT_CACHE_PATH,
+        dataset_path: str = BOOTSTRAP_DATASET_PATH,
         embedder=embed_text,
         batch_embedder=embed_texts,
         batch_size: int = DEFAULT_BATCH_SIZE,
+        min_similarity: float = MIN_LOG_SIMILARITY,
+        warm_up_fn=warm_up,
     ):
         self.log_path = Path(log_path)
         self.cache_path = cache_path
+        self.dataset_path = Path(dataset_path) if dataset_path else None
         self.embedder = embedder
         self.batch_embedder = batch_embedder
         self.batch_size = batch_size
+        self.min_similarity = min_similarity
+        self.warm_up_fn = warm_up_fn
 
         self._store: EmbeddingStore | None = None
         self._open_store()
@@ -109,6 +132,26 @@ class LogSearchService:
         """Open the cache for reading, if it has been built."""
         if self._store is None and self._cache_built():
             self._store = EmbeddingStore(self.cache_path)
+            self._verify_cache_matches_log()
+
+    def _verify_cache_matches_log(self) -> None:
+        """Refuse a cache that was built from a different history file.
+
+        Silently reusing the wrong cache would answer satellite queries
+        out of some other log, which is worse than failing loudly.
+        """
+        if self._store is None or len(self._store) == 0:
+            return
+
+        stored_source = self._store.metadata(0)["source_text"]
+
+        if stored_source != self.log_path.name:
+            raise CacheError(
+                f"The cache at {self.cache_path} was built from "
+                f"{stored_source}, but this service reads "
+                f"{self.log_path.name}; delete the cache or point at the "
+                "right one"
+            )
 
     def _close_store(self) -> None:
         """Release the memory map so the files can be appended to."""
@@ -150,6 +193,15 @@ class LogSearchService:
         """
         history = parse_fault_records(self.log_path)
 
+        if last_offset > 0 and (
+            not history or history[-1].offset < last_offset
+        ):
+            raise CacheError(
+                f"The cache at {self.cache_path} already holds a record at "
+                f"line {last_offset}, which {self.log_path} no longer has; "
+                "the history was truncated or replaced"
+            )
+
         return records_after(history, last_offset)
 
     def _index(self, records: list[LogRecord]) -> None:
@@ -188,12 +240,49 @@ class LogSearchService:
             if writer is not None:
                 writer.close()
 
+    def warm_up(self) -> None:
+        """Load the embedding model now rather than on the first query.
+
+        This embeds one throwaway token, never any log text, so calling
+        it after ``refresh`` does not embed the history a second time.
+        """
+        self.warm_up_fn()
+
+    def bootstrap(self) -> int:
+        """Seed the satellite history from the prepared dataset, once.
+
+        The dataset holds faults from previous satellites, previous
+        missions and test environments.  It is copied into the history
+        file only when that history does not exist yet, so a restart
+        never imports it a second time and never duplicates a record.
+        Runtime faults are appended to the same file afterwards, which
+        is what keeps prepared and learned faults in ONE history.
+
+        Returns how many fault records were imported.
+        """
+        if self.dataset_path is None or not self.dataset_path.is_file():
+            return 0
+
+        if self.log_path.is_file() and self.log_path.stat().st_size > 0:
+            return 0
+
+        self.log_path.parent.mkdir(parents=True, exist_ok=True)
+        self.log_path.write_text(
+            self.dataset_path.read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+
+        return len(parse_fault_records(self.log_path))
+
     def refresh(self) -> int:
-        """Index every fault entry appended since the last run.
+        """Import any prepared history, then index whatever is new.
 
         Returns how many new records were embedded.  On a first run this
-        builds the whole cache; afterwards it normally does nothing.
+        imports the dataset and builds the whole cache; afterwards it
+        normally does nothing.
         """
+        self.bootstrap()
+
         pending = self._pending_records(self.last_indexed_offset())
 
         if not pending:
@@ -214,20 +303,30 @@ class LogSearchService:
         error_text: str,
         k: int = 5,
     ) -> list[SemanticResult]:
-        """Return the ``k`` historical faults most similar to the text.
+        """Return historical faults genuinely similar to ``error_text``.
 
-        This never writes anything, so it is safe to call as often as
-        wanted.
+        At most ``k`` results come back, and possibly none.  Ranking is
+        left entirely to ``semantic_search``; this only drops results
+        that are too weak to be worth showing, so a query with no real
+        match returns an empty list instead of five bad guesses.
         """
         if self._store is None or len(self._store) == 0:
             return []
 
-        return semantic_search(
+        ranked = semantic_search(
             error_text,
             self._store,
             self.embedder,
             k=k,
         )
+
+        # ``ranked`` is already ordered best first, so filtering keeps
+        # the strongest matches and simply stops including the weak tail.
+        return [
+            result
+            for result in ranked
+            if result.similarity >= self.min_similarity
+        ][:k]
 
     # ------------------------------------------------------------------
     # The full new-error flow
@@ -258,6 +357,11 @@ class LogSearchService:
                 f"{level} is not a fault level; expected one of "
                 f"{', '.join(sorted(FAULT_LEVELS))}"
             )
+
+        # An empty entry would append a blank line to the history and
+        # embed nothing meaningful, so it is refused outright.
+        if not error_text.strip():
+            raise ValueError("A fault must have a message")
 
         results = self.search_similar_logs(error_text, k=k)
 

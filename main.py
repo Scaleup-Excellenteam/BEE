@@ -21,17 +21,27 @@ LOGGER = get_application_logger()
 def initialize_log_search() -> LogSearchService:
     """Return a ready semantic log search service.
 
-    The service embeds its history locally, so this needs no API key and
-    makes no network call.  On a first run it builds
-    ``log_embedding_cache`` from the ERROR, WARNING and CRITICAL entries
-    already in the log; afterwards it embeds only the entries appended
-    since, which normally means none at all.
+    The service uses local semantic inference, so it needs no API key and
+    no cloud service.  Once the model is installed locally, startup and
+    search do not require a cloud API; only a machine that does not yet
+    have the model downloads it, once.
+
+    On a first run it imports the prepared historical fault dataset into
+    the satellite history and builds the cache from every ERROR, WARNING
+    and CRITICAL entry in it; afterwards it embeds only the faults
+    appended since, which normally means none at all.
     """
     LOGGER.info("Semantic log search preparation started.")
     preparation_started = time.perf_counter()
 
     service = LogSearchService()
     added = service.refresh()
+
+    # Load the model here rather than on the first query.  A cold cache
+    # has already loaded it during refresh, so this costs nothing then;
+    # a warm cache embeds nothing, and without this the first mode 2
+    # query would pay several seconds of model loading on its own.
+    service.warm_up()
 
     elapsed_seconds = time.perf_counter() - preparation_started
     indexed = len(service)
@@ -116,11 +126,12 @@ def main() -> None:
         else:
             try:
                 # The service is built once here and reused for every
-                # mode 2 query.  Only its read-only search is exposed to
-                # the CLI: a typed query is a demo search, never a real
-                # fault, so it must not be appended to the log.
+                # mode 2 entry.  Mode 2 records: each message is matched
+                # against the history and then becomes part of it, which
+                # is why the CLI is given record_error rather than the
+                # read-only search.
                 run_cli(
-                    log_search_fn=log_search.search_similar_logs,
+                    record_fault_fn=log_search.record_error,
                     log_size_fn=lambda: len(log_search),
                 )
             finally:
