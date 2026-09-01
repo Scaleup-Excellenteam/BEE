@@ -3,3 +3,5 @@ extracted_archive/
 __pycache__/
 .pytest_cache/
 logs/
+corpus_index.sqlite3
+.corpus_index.sqlite3.*.tmp
